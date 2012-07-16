@@ -322,6 +322,15 @@ function getScrollPosition(tab, callback) {
   scrollPort.postMessage({currentTab: tab});
 }
 
+// Close other tabs
+function onlyTab(callback) {
+  chrome.tabs.query({ windowId: chrome.windows.WINDOW_ID_CURRENT, active: false }, function(tabs){
+    var ids = Utils.map(tabs, function(t) { return t.id; });
+    chrome.tabs.remove(ids, function(){ callback(); });
+  });
+}
+
+
 // Start action functions
 function createTab(callback) {
   chrome.tabs.create({}, function(tab) { callback(); });
