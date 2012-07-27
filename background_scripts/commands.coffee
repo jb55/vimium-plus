@@ -98,7 +98,8 @@ Commands =
     historyNavigation:
       ["goBack", "goForward"]
     tabManipulation:
-      ["nextTab", "previousTab", "firstTab", "lastTab", "createTab", "onlyTab", "removeTab", "restoreTab"]
+      ["nextTab", "previousTab", "firstTab", "lastTab", "createTab",
+       "onlyTab", "closeTabsRight", "closeTabsLeft", "removeTab", "restoreTab"]
     misc:
       ["showHelp"]
 
@@ -162,7 +163,9 @@ defaultKeyMappings =
 
   "t": "createTab"
   "x": "removeTab"
-  "w": "onlyTab"
+  "wo": "onlyTab"
+  "wh": "closeTabsLeft"
+  "wl": "closeTabsRight"
   "X": "restoreTab"
 
   "o": "Vomnibar.activate"
@@ -230,6 +233,8 @@ commandDescriptions =
   lastTab: ["Go to the last tab", { background: true }]
   createTab: ["Create new tab", { background: true }]
   onlyTab: ["Close other tabs", { background: true }]
+  closeTabsRight: ["Close right tabs", { background: true }]
+  closeTabsLeft: ["Close left tabs", { background: true }]
   removeTab: ["Close current tab", { background: true }]
   restoreTab: ["Restore closed tab", { background: true }]
 

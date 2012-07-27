@@ -322,14 +322,46 @@ function getScrollPosition(tab, callback) {
   scrollPort.postMessage({currentTab: tab});
 }
 
-// Close other tabs
-function onlyTab(callback) {
-  chrome.tabs.query({ windowId: chrome.windows.WINDOW_ID_CURRENT, active: false }, function(tabs){
-    var ids = Utils.map(tabs, function(t) { return t.id; });
-    chrome.tabs.remove(ids, function(){ callback(); });
+function getAllTabs(cb){
+  chrome.tabs.query({ windowId: chrome.windows.WINDOW_ID_CURRENT }, cb);
+}
+
+function getCurrentTab(cb){
+  chrome.tabs.query({ windowId: chrome.windows.WINDOW_ID_CURRENT, active: true }, function(tabs){
+    cb(tabs[0]);
   });
 }
 
+function removeTabsPred(pred, cb){
+  getCurrentTab(function(currentTab) {
+    getAllTabs(function(tabs){
+      var filt = Utils.filter(tabs, function(t){ return pred(t, currentTab); });
+      var ids  = Utils.pluck(filt, "id");
+      chrome.tabs.remove(ids, cb);
+    });
+  });
+}
+
+// Close tabs to the left of the active tab
+function closeTabsLeft(cb){
+  removeTabsPred(function(t, ct){
+    return t.index < ct.index;
+  }, cb);
+}
+
+// Close tabs to the right of the active tab
+function closeTabsRight(cb){
+  removeTabsPred(function(t, ct){
+    return t.index > ct.index;
+  }, cb);
+}
+
+// Close other tabs
+function onlyTab(cb){
+  removeTabsPred(function(t, ct){
+    return t.id !== ct.id;
+  }, cb);
+}
 
 // Start action functions
 function createTab(callback) {
