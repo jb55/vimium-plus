@@ -1,5 +1,5 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 1,
   "name": "VimiumPlus",
   "version": "1.37.0.0",
   "description": "The Hacker's Browser. Vimium provides keyboard shortcuts for navigation and control in the spirit of Vim.",
