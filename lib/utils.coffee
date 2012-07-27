@@ -6,7 +6,9 @@ Utils =
     manifestRequest.send(null)
     JSON.parse(manifestRequest.responseText).version
 
-  map: (l, fn) -> fn x for x in l
+  map:    (l, fn)   -> fn x for x in l
+  pluck:  (l, k)    -> x[k] for x in l
+  filter: (l, pred) -> x for x in l when pred(x)
 
   # Takes a dot-notation object string and call the function
   # that it points to with the correct value for 'this'.
