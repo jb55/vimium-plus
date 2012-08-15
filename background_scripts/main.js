@@ -16,15 +16,13 @@ var namedKeyRegex = /^(<(?:[amc]-.|(?:[amc]-)?[a-z0-9]{2,5})>)(.*)$/;
 // Port handler mapping
 var portHandlers = {
   keyDown:              handleKeyDown,
-  returnScrollPosition: handleReturnScrollPosition,
-  getCurrentTabUrl:     getCurrentTabUrl,
   settings:             handleSettings,
   filterCompleter:      filterCompleter
 };
 
 var sendRequestHandlers = {
   getCompletionKeys: getCompletionKeysRequest,
-  getLinkHintCss: getLinkHintCss,
+  getCurrentTabUrl: getCurrentTabUrl,
   openUrlInNewTab: openUrlInNewTab,
   openUrlInCurrentTab: openUrlInCurrentTab,
   openOptionsPageInNewTab: openOptionsPageInNewTab,
@@ -41,7 +39,6 @@ var sendRequestHandlers = {
 
 // Event handlers
 var selectionChangedHandlers = [];
-var getScrollPositionHandlers = {}; // tabId -> function(tab, scrollX, scrollY);
 var tabLoadedHandlers = {}; // tabId -> function()
 
 var completionSources = {
@@ -87,24 +84,16 @@ chrome.extension.onRequest.addListener(function (request, sender, sendResponse) 
   var senderTabId = sender.tab ? sender.tab.id : null;
   if (sendRequestHandlers[request.handler])
     sendResponse(sendRequestHandlers[request.handler](request, sender));
+  // Ensure the sendResponse callback is freed.
+  return false;
 });
-
-function handleReturnScrollPosition(args) {
-  if (getScrollPositionHandlers[args.currentTab.id]) {
-    // Delete first to be sure there's no circular events.
-    var toCall = getScrollPositionHandlers[args.currentTab.id];
-    delete getScrollPositionHandlers[args.currentTab.id];
-    toCall(args.currentTab, args.scrollX, args.scrollY);
-  }
-}
 
 /*
  * Used by the content scripts to get their full URL. This is needed for URLs like "view-source:http:// .."
  * because window.location doesn't know anything about the Chrome-specific "view-source:".
  */
-function getCurrentTabUrl(args, port) {
-  var returnPort = chrome.tabs.connect(port.sender.tab.id, { name: "returnCurrentTabUrl" });
-  returnPort.postMessage({ url: port.sender.tab.url });
+function getCurrentTabUrl(request, sender) {
+  return sender.tab.url;
 }
 
 /*
@@ -146,7 +135,7 @@ function saveHelpDialogSettings(request) {
 function showHelp(callback, frameId) {
   chrome.tabs.getSelected(null, function(tab) {
     chrome.tabs.sendRequest(tab.id,
-      { name: "showHelpDialog", dialogHtml: helpDialogHtml(), frameId:frameId });
+      { name: "toggleHelpDialog", dialogHtml: helpDialogHtml(), frameId:frameId });
   });
 }
 
@@ -239,13 +228,6 @@ function openCopiedUrlInCurrentTab(request) { openUrlInCurrentTab({ url: Clipboa
 function openCopiedUrlInNewTab(request) { openUrlInNewTab({ url: Clipboard.paste() }); }
 
 /*
- * Returns the user-provided CSS overrides.
- */
-function getLinkHintCss(request) {
-  return { linkHintCss: (Settings.get("userDefinedLinkHintCss") || "") };
-}
-
-/*
  * Called when the user has clicked the close icon on the "Vimium has been updated" message.
  * We should now dismiss that message in all tabs.
  */
@@ -312,14 +294,6 @@ chrome.tabs.onSelectionChanged.addListener(function(tabId, selectionInfo) {
 function repeatFunction(func, totalCount, currentCount, frameId) {
   if (currentCount < totalCount)
     func(function() { repeatFunction(func, totalCount, currentCount + 1, frameId); }, frameId);
-}
-
-// Returns the scroll coordinates of the given tab. Pass in a callback of the form:
-//   function(tab, scrollX, scrollY) { .. }
-function getScrollPosition(tab, callback) {
-  getScrollPositionHandlers[tab.id] = callback;
-  var scrollPort = chrome.tabs.connect(tab.id, { name: "getScrollPosition" });
-  scrollPort.postMessage({currentTab: tab});
 }
 
 function getAllTabs(cb){
@@ -434,8 +408,7 @@ function updateActiveState(tabId) {
     // Default to disabled state in case we can't connect to Vimium, primarily for the "New Tab" page.
     // TODO(philc): Re-enable once we've restyled the browser action icon.
     // chrome.browserAction.setIcon({ path: disabledIcon });
-    var returnPort = chrome.tabs.connect(tabId, { name: "getActiveState" });
-    returnPort.onMessage.addListener(function(response) {
+    chrome.tabs.sendRequest(tabId, { name: "getActiveState" }, function(response) {
       var isCurrentlyEnabled = response.enabled;
       var shouldBeEnabled = isEnabledForUrl({url: tab.url}).isEnabledForUrl;
 
@@ -444,13 +417,12 @@ function updateActiveState(tabId) {
           chrome.browserAction.setIcon({ path: enabledIcon });
         } else {
           chrome.browserAction.setIcon({ path: disabledIcon });
-          chrome.tabs.connect(tabId, { name: "disableVimium" }).postMessage();
+          chrome.tabs.sendRequest(tabId, { name: "disableVimium" });
         }
       } else {
         chrome.browserAction.setIcon({ path: disabledIcon });
       }
     });
-    returnPort.postMessage();
   });
 }
 
@@ -530,10 +502,12 @@ function restoreTab(callback) {
       // wait until that's over before we can call setScrollPosition.
       chrome.tabs.create({ url: tabQueueEntry.url, index: tabQueueEntry.positionIndex }, function(tab) {
         tabLoadedHandlers[tab.id] = function() {
-          var scrollPort = chrome.tabs.connect(tab.id, {name: "setScrollPosition"});
-          scrollPort.postMessage({ scrollX: tabQueueEntry.scrollX, scrollY: tabQueueEntry.scrollY });
+          var scrollPort = chrome.tabs.sendRequest(tab.id, {
+            name: "setScrollPosition",
+            scrollX: tabQueueEntry.scrollX,
+            scrollY: tabQueueEntry.scrollY
+          });
         };
-
         callback();
       });
     }
@@ -652,14 +626,14 @@ function checkKeyQueue(keysToCheck, tabId, frameId) {
     registryEntry = Commands.keyToCommandRegistry[command];
 
     if (!registryEntry.isBackgroundCommand) {
-      var port = chrome.tabs.connect(tabId, { name: "executePageCommand" });
-      port.postMessage({ command: registryEntry.command,
-                         frameId: frameId,
-                         count: count,
-                         passCountToFunction: registryEntry.passCountToFunction,
-                         completionKeys: generateCompletionKeys("")
-                       });
-
+      chrome.tabs.sendRequest(tabId, {
+        name: "executePageCommand",
+        command: registryEntry.command,
+        frameId: frameId,
+        count: count,
+        passCountToFunction: registryEntry.passCountToFunction,
+        completionKeys: generateCompletionKeys("")
+      });
       refreshedCompletionKeys = true;
     } else {
       if(registryEntry.passCountToFunction){
@@ -832,11 +806,13 @@ function init() {
       for (var j in windows[i].tabs) {
         var tab = windows[i].tabs[j];
         updateOpenTabs(tab);
-        getScrollPosition(tab, function(tab, scrollX, scrollY) {
-          // Not using the tab defined in the for loop because
-          // it might have changed by the time this callback is activated.
-          updateScrollPosition(tab, scrollX, scrollY);
-        });
+        chrome.tabs.sendRequest(tab.id, { name: "getScrollPosition" }, function() {
+          return function(response) {
+            if (response === undefined)
+              return;
+            updateScrollPosition(tab, response.scrollX, response.scrollY);
+          };
+        }());
       }
     }
   });

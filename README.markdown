@@ -50,7 +50,9 @@ Navigating the current page:
 Navigating to new pages:
 
     o       Open URL, bookmark, or history entry
-    O       Open URL, bookmark, history entry, starting with the current URL
+    O       Open URL, bookmark, history entry in a new tab
+    b       Open bookmark
+    B       Open bookmark in a new tab
 
 Using find:
 
@@ -146,6 +148,10 @@ don't exceed 110 characters.
 
 Release Notes
 -------------
+
+1.38 (Unreleased)
+
+- 'O' now opens Vomnibar results in a new tab. 'B' does the same for bookmarks only.
 
 1.37 (07/07/2012)
 
