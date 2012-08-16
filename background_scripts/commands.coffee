@@ -178,7 +178,7 @@ defaultKeyMappings =
   "w$": "moveTabEnd"
   "wh": "moveTabLeft"
   "wl": "moveTabRight"
-  "wO": "onlyTab"
+  "wo": "onlyTab"
   "wH": "closeTabsLeft"
   "wL": "closeTabsRight"
   "X": "restoreTab"
