@@ -337,6 +337,36 @@ function onlyTab(cb){
   }, cb);
 }
 
+function moveTab(cb, pred) {
+  getCurrentTab(function(tab){
+    chrome.tabs.move(tab.id, { index: pred(tab) }, cb);
+  });
+}
+
+function moveTabEnd(cb) {
+  moveTab(cb, function(tab){
+    return -1;
+  });
+}
+
+function moveTabStart(cb) {
+  moveTab(cb, function(tab){
+    return 0;
+  });
+}
+
+function moveTabRight(cb) {
+  moveTab(cb, function(tab){
+    return tab.index + 1;
+  });
+}
+
+function moveTabLeft(cb) {
+  moveTab(cb, function(tab){
+    return tab.index - 1;
+  });
+}
+
 // Start action functions
 function createTab(callback) {
   chrome.tabs.create({}, function(tab) { callback(); });

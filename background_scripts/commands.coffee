@@ -99,17 +99,28 @@ Commands =
       ["goBack", "goForward"]
     tabManipulation:
       ["nextTab", "previousTab", "firstTab", "lastTab", "createTab",
-       "onlyTab", "closeTabsRight", "closeTabsLeft", "removeTab", "restoreTab"]
+       "onlyTab", "closeTabsRight", "closeTabsLeft", "removeTab", "restoreTab",
+       "moveTabStart", "moveTabRight", "moveTabLeft", "moveTabEnd"]
     misc:
       ["showHelp"]
 
-  # Rarely used commands are not shown by default in the help dialog or in the README. The goal is to present
-  # a focused, high-signal set of commands to the new and casual user. Only those truly hungry for more power
-  # from Vimium will uncover these gems.
+  # Rarely used commands are not shown by default in the help dialog or in the
+  # README. The goal is to present a focused, high-signal set of commands to
+  # the new and casual user. Only those truly hungry for more power from Vimium
+  # will uncover these gems.
   advancedCommands: [
-    "scrollToLeft", "scrollToRight",
-    "goUp", "focusInput", "LinkHints.activateModeWithQueue",
-    "goPrevious", "goNext"]
+      "scrollToLeft"
+    , "scrollToRight"
+    , "goUp"
+    , "focusInput"
+    , "LinkHints.activateModeWithQueue"
+    , "goPrevious"
+    , "goNext"
+    , "moveTabStart"
+    , "moveTabRight"
+    , "moveTabLeft"
+    , "moveTabEnd"
+  ]
 
 defaultKeyMappings =
   "?": "showHelp"
@@ -163,9 +174,13 @@ defaultKeyMappings =
 
   "t": "createTab"
   "x": "removeTab"
-  "wo": "onlyTab"
-  "wh": "closeTabsLeft"
-  "wl": "closeTabsRight"
+  "w0": "moveTabStart"
+  "w$": "moveTabEnd"
+  "wh": "moveTabLeft"
+  "wl": "moveTabRight"
+  "wO": "onlyTab"
+  "wH": "closeTabsLeft"
+  "wL": "closeTabsRight"
   "X": "restoreTab"
 
   "o": "Vomnibar.activate"
@@ -228,6 +243,10 @@ commandDescriptions =
   goUp: ["Go up the URL hierarchy", { passCountToFunction: true }]
 
   # Manipulating tabs
+  moveTabEnd: ["Move current to the end", { background: true }]
+  moveTabStart: ["Move current to the start", { background: true }]
+  moveTabLeft: ["Move current tab to the right", { background: true }]
+  moveTabRight: ["Move current tab to the left", { background: true }]
   nextTab: ["Go one tab right", { background: true }]
   previousTab: ["Go one tab left", { background: true }]
   firstTab: ["Go to the first tab", { background: true }]
