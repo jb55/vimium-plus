@@ -1,6 +1,12 @@
 Vimium - The Hacker's Browser
 =============================
 
+# VimiumPlus Chrome Extensions Gallery Download
+
+[Chrome Extensions Gallery](https://chrome.google.com/webstore/detail/cjfocibepmjhlehihiijgadhgfgnamhp).
+
+...
+
 Vimium is a Chrome extension that provides keyboard based navigation and control in the spirit of the Vim
 editor.
 
