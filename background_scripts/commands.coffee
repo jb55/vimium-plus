@@ -116,10 +116,6 @@ Commands =
     , "LinkHints.activateModeWithQueue"
     , "goPrevious"
     , "goNext"
-    , "moveTabStart"
-    , "moveTabRight"
-    , "moveTabLeft"
-    , "moveTabEnd"
   ]
 
 defaultKeyMappings =
@@ -243,8 +239,8 @@ commandDescriptions =
   goUp: ["Go up the URL hierarchy", { passCountToFunction: true }]
 
   # Manipulating tabs
-  moveTabEnd: ["Move current to the end", { background: true }]
-  moveTabStart: ["Move current to the start", { background: true }]
+  moveTabEnd: ["Move current tab to the end", { background: true }]
+  moveTabStart: ["Move current tab to the start", { background: true }]
   moveTabLeft: ["Move current tab to the right", { background: true }]
   moveTabRight: ["Move current tab to the left", { background: true }]
   nextTab: ["Go one tab right", { background: true }]
