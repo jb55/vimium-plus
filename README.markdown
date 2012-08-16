@@ -1,9 +1,9 @@
 Vimium - The Hacker's Browser
 =============================
 
-# VimiumPlus Chrome Extensions Gallery Download
+## Download
 
-[Chrome Extensions Gallery](https://chrome.google.com/webstore/detail/cjfocibepmjhlehihiijgadhgfgnamhp).
+[Download VimiumPlus at the Chrome Web Store](https://chrome.google.com/webstore/detail/cjfocibepmjhlehihiijgadhgfgnamhp).
 
 ...
 
