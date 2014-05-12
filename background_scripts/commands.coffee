@@ -276,8 +276,6 @@ commandDescriptions =
   # Manipulating tabs
   moveTabEnd: ["Move current tab to the end", { background: true }]
   moveTabStart: ["Move current tab to the start", { background: true }]
-  moveTabLeft: ["Move current tab to the right", { background: true }]
-  moveTabRight: ["Move current tab to the left", { background: true }]
   nextTab: ["Go one tab right", { background: true }]
   previousTab: ["Go one tab left", { background: true }]
   firstTab: ["Go to the first tab", { background: true }]
