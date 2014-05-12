@@ -1,0 +1,13 @@
+language: node_js
+node_js: 0.8
+before_install:
+  - "npm install -g coffee-script"
+  - "cake build"
+script: "cake test"
+notifications:
+  email: false
+branches:
+  except:
+    - experimental
+    - 1.43
+    - commands

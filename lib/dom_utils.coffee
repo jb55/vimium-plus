@@ -2,11 +2,23 @@ DomUtils =
   #
   # Runs :callback if the DOM has loaded, otherwise runs it on load
   #
-  documentReady: (->
+  documentReady: do ->
     loaded = false
     window.addEventListener("DOMContentLoaded", -> loaded = true)
     (callback) -> if loaded then callback() else window.addEventListener("DOMContentLoaded", callback)
-  )()
+
+  #
+  # Adds a list of elements to a page.
+  # Note that adding these nodes all at once (via the parent div) is significantly faster than one-by-one.
+  #
+  addElementList: (els, overlayOptions) ->
+    parent = document.createElement("div")
+    parent.id = overlayOptions.id if overlayOptions.id?
+    parent.className = overlayOptions.className if overlayOptions.className?
+    parent.appendChild(el) for el in els
+
+    document.documentElement.appendChild(parent)
+    parent
 
   #
   # Remove an element from its DOM tree.
@@ -34,38 +46,47 @@ DomUtils =
   #
   getVisibleClientRect: (element) ->
     # Note: this call will be expensive if we modify the DOM in between calls.
-    clientRects = element.getClientRects()
-    clientRectsLength = clientRects.length
+    clientRects = ({
+      top: clientRect.top, right: clientRect.right, bottom: clientRect.bottom, left: clientRect.left,
+      width: clientRect.width, height: clientRect.height
+    } for clientRect in element.getClientRects())
 
-    for i in [0...clientRectsLength]
-      if (clientRects[i].top < -2 || clientRects[i].top >= window.innerHeight - 4 ||
-          clientRects[i].left < -2 || clientRects[i].left  >= window.innerWidth - 4)
+    for clientRect in clientRects
+      if (clientRect.top < 0)
+        clientRect.height += clientRect.top
+        clientRect.top = 0
+
+      if (clientRect.left < 0)
+        clientRect.width += clientRect.left
+        clientRect.left = 0
+
+      if (clientRect.top >= window.innerHeight - 4 || clientRect.left  >= window.innerWidth - 4)
         continue
 
-      if (clientRects[i].width < 3 || clientRects[i].height < 3)
+      if (clientRect.width < 3 || clientRect.height < 3)
         continue
 
       # eliminate invisible elements (see test_harnesses/visibility_test.html)
       computedStyle = window.getComputedStyle(element, null)
       if (computedStyle.getPropertyValue('visibility') != 'visible' ||
-          computedStyle.getPropertyValue('display') == 'none')
+          computedStyle.getPropertyValue('display') == 'none' ||
+          computedStyle.getPropertyValue('opacity') == '0')
         continue
 
-      return clientRects[i]
+      return clientRect
 
-    for i in [0...clientRectsLength]
+    for clientRect in clientRects
       # If the link has zero dimensions, it may be wrapping visible
       # but floated elements. Check for this.
-      if (clientRects[i].width == 0 || clientRects[i].height == 0)
-        childrenCount = element.children.length
-        for j in [0...childrenCount]
-          computedStyle = window.getComputedStyle(element.children[j], null)
-          # Ignore child elements which are not floated and not absolutely positioned for parent elements with zero width/height
-          if (computedStyle.getPropertyValue('float') == 'none' && computedStyle.getPropertyValue('position') != 'absolute')
-            continue
-          childClientRect = this.getVisibleClientRect(element.children[j])
-          if (childClientRect == null)
-            continue
+      if (clientRect.width == 0 || clientRect.height == 0)
+        for child in element.children
+          computedStyle = window.getComputedStyle(child, null)
+          # Ignore child elements which are not floated and not absolutely positioned for parent elements with
+          # zero width/height
+          continue if (computedStyle.getPropertyValue('float') == 'none' &&
+            computedStyle.getPropertyValue('position') != 'absolute')
+          childClientRect = @getVisibleClientRect(child)
+          continue if (childClientRect == null)
           return childClientRect
     null
 
@@ -88,8 +109,8 @@ DomUtils =
     eventSequence = ["mouseover", "mousedown", "mouseup", "click"]
     for event in eventSequence
       mouseEvent = document.createEvent("MouseEvents")
-      mouseEvent.initMouseEvent(event, true, true, window, 1, 0, 0, 0, 0, modifiers.ctrlKey, false, false,
-          modifiers.metaKey, 0, null)
+      mouseEvent.initMouseEvent(event, true, true, window, 1, 0, 0, 0, 0, modifiers.ctrlKey, modifiers.altKey,
+      modifiers.shiftKey, modifiers.metaKey, 0, null)
       # Debugging note: Firefox will not execute the element's default action if we dispatch this click event,
       # but Webkit will. Dispatching a click on an input box does not seem to focus it; we do that separately
       element.dispatchEvent(mouseEvent)
@@ -103,8 +124,12 @@ DomUtils =
     flashEl.style.top = rect.top  + window.scrollY  + "px"
     flashEl.style.width = rect.width + "px"
     flashEl.style.height = rect.height + "px"
-    document.body.appendChild(flashEl)
-    setTimeout((-> flashEl.parentNode.removeChild(flashEl)), 400)
+    document.documentElement.appendChild(flashEl)
+    setTimeout((-> DomUtils.removeElement flashEl), 400)
+
+  suppressEvent: (event) ->
+    event.preventDefault()
+    event.stopPropagation()
 
 root = exports ? window
 root.DomUtils = DomUtils

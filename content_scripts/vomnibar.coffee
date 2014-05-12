@@ -24,7 +24,7 @@ Vomnibar =
       @vomnibarUI.update()
 
   activate: -> @activateWithCompleter("omni", 100)
-  activateInNewTab: -> @activateWithCompleter("omni", 100, null, true, true)
+  activateInNewTab: -> @activateWithCompleter("omni", 100, null, false, true)
   activateTabSelection: -> @activateWithCompleter("tabs", 0, null, true)
   activateBookmarks: -> @activateWithCompleter("bookmarks", 0, null, true)
   activateBookmarksInNewTab: -> @activateWithCompleter("bookmarks", 0, null, true, true)
@@ -52,13 +52,13 @@ class VomnibarUI
   show: ->
     @box.style.display = "block"
     @input.focus()
-    handlerStack.push({ keydown: @onKeydown.bind(this) })
+    @handlerId = handlerStack.push keydown: @onKeydown.bind @
 
   hide: ->
     @box.style.display = "none"
     @completionList.style.display = "none"
     @input.blur()
-    handlerStack.pop()
+    handlerStack.remove @handlerId
 
   reset: ->
     @input.value = ""
@@ -68,8 +68,6 @@ class VomnibarUI
     @update(true)
 
   updateSelection: ->
-    if (@completions.length > 0)
-      @selection = Math.min(@selection, @completions.length - 1)
     for i in [0...@completionList.children.length]
       @completionList.children[i].className = (if i == @selection then "vomnibarSelected" else "")
 
@@ -96,7 +94,8 @@ class VomnibarUI
     action = @actionFromKeyEvent(event)
     return true unless action # pass through
 
-    openInNewTab = @forceNewTab || (event.shiftKey || KeyboardUtils.isPrimaryModifierKey(event))
+    openInNewTab = @forceNewTab ||
+      (event.shiftKey || event.ctrlKey || KeyboardUtils.isPrimaryModifierKey(event))
     if (action == "dismiss")
       @hide()
     else if (action == "up")
@@ -113,8 +112,10 @@ class VomnibarUI
       # google.
       if (@selection == -1)
         query = @input.value.trim()
+        # <Enter> on an empty vomnibar is a no-op.
+        return unless 0 < query.length
         @hide()
-        chrome.extension.sendRequest({
+        chrome.runtime.sendMessage({
           handler: if openInNewTab then "openUrlInNewTab" else "openUrlInCurrentTab"
           url: query })
       else
@@ -123,7 +124,7 @@ class VomnibarUI
           @completions[@selection].performAction(openInNewTab)
           @hide()
 
-    # It seems like we have to manually supress the event here and still return true.
+    # It seems like we have to manually suppress the event here and still return true.
     event.stopPropagation()
     event.preventDefault()
     true
@@ -138,8 +139,9 @@ class VomnibarUI
 
   populateUiWithCompletions: (completions) ->
     # update completion list with the new data
-    @completionList.innerHTML = completions.map((completion) -> "<li>" + completion.html + "</li>").join("")
+    @completionList.innerHTML = completions.map((completion) -> "<li>#{completion.html}</li>").join("")
     @completionList.style.display = if completions.length > 0 then "block" else "none"
+    @selection = Math.min(Math.max(@initialSelectionValue, @selection), @completions.length - 1)
     @updateSelection()
 
   update: (updateSynchronously, callback) ->
@@ -161,18 +163,19 @@ class VomnibarUI
 
   initDom: ->
     @box = Utils.createElementFromHtml(
-      '<div id="vomnibar" class="vimiumReset">' +
-        '<div class="vimiumReset vomnibarSearchArea">' +
-          '<input type="text" class="vimiumReset" />' +
-        '</div>' +
-        '<ul></ul>' +
-      '</div>')
+      """
+      <div id="vomnibar" class="vimiumReset">
+        <div class="vimiumReset vomnibarSearchArea">
+          <input type="text" class="vimiumReset">
+        </div>
+        <ul class="vimiumReset"></ul>
+      </div>
+      """)
     @box.style.display = "none"
     document.body.appendChild(@box)
 
     @input = document.querySelector("#vomnibar input")
     @input.addEventListener "input", => @update()
-    console.log("@input:", @input);
     @completionList = document.querySelector("#vomnibar ul")
     @completionList.style.display = "none"
 
@@ -180,11 +183,12 @@ class VomnibarUI
 # Sends filter and refresh requests to a Vomnibox completer on the background page.
 #
 class BackgroundCompleter
-  # - name: The background page completer that you want to interface with. Either "omni" or "tabs". */
+  # - name: The background page completer that you want to interface with. Either "omni", "tabs", or
+  # "bookmarks". */
   constructor: (@name) ->
-    @filterPort = chrome.extension.connect({ name: "filterCompleter" })
+    @filterPort = chrome.runtime.connect({ name: "filterCompleter" })
 
-  refresh: -> chrome.extension.sendRequest({ handler: "refreshCompleter", name: @name })
+  refresh: -> chrome.runtime.sendMessage({ handler: "refreshCompleter", name: @name })
 
   filter: (query, callback) ->
     id = Utils.createUniqueId()
@@ -212,14 +216,16 @@ extend BackgroundCompleter,
     navigateToUrl: (url, openInNewTab) ->
       # If the URL is a bookmarklet prefixed with javascript:, we shouldn't open that in a new tab.
       if url.startsWith "javascript:"
-        eval decodeURIComponent(url["javascript:".length..])
+        script = document.createElement 'script'
+        script.textContent = decodeURIComponent(url["javascript:".length..])
+        (document.head || document.documentElement).appendChild script
       else
-        chrome.extension.sendRequest(
+        chrome.runtime.sendMessage(
           handler: if openInNewTab then "openUrlInNewTab" else "openUrlInCurrentTab"
           url: url,
           selected: openInNewTab)
 
-    switchToTab: (tabId) -> chrome.extension.sendRequest({ handler: "selectSpecificTab", id: tabId })
+    switchToTab: (tabId) -> chrome.runtime.sendMessage({ handler: "selectSpecificTab", id: tabId })
 
 root = exports ? window
 root.Vomnibar = Vomnibar
