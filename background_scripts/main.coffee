@@ -223,10 +223,7 @@ getAllTabs = (cb) ->
   , cb
 
 getCurrentTab = (cb) ->
-  chrome.tabs.query
-    windowId: chrome.windows.WINDOW_ID_CURRENT
-    active: true
-  , (tabs) ->
+  chrome.tabs.query { currentWindow: true, active: true }, (tabs) ->
     cb tabs[0]
 
 removeTabsPred = (pred, cb) ->
