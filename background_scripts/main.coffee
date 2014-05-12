@@ -217,9 +217,53 @@ repeatFunction = (func, totalCount, currentCount, frameId) ->
       -> repeatFunction(func, totalCount, currentCount + 1, frameId),
       frameId)
 
-moveTab = (callback, direction) ->
-  chrome.tabs.getSelected(null, (tab) ->
-    chrome.tabs.move(tab.id, {index: tab.index + direction }, callback))
+getAllTabs = (cb) ->
+  chrome.tabs.query
+    windowId: chrome.windows.WINDOW_ID_CURRENT
+  , cb
+
+getCurrentTab = (cb) ->
+  chrome.tabs.query
+    windowId: chrome.windows.WINDOW_ID_CURRENT
+    active: true
+  , (tabs) ->
+    cb tabs[0]
+
+removeTabsPred = (pred, cb) ->
+  getCurrentTab (currentTab) ->
+    getAllTabs (tabs) ->
+      filt = Utils.filter tabs, (t) ->
+        pred t, currentTab
+      ids = Utils.pluck(filt, "id")
+      chrome.tabs.remove ids, cb
+
+# Close tabs to the left of the active tab
+closeTabsLeft = (cb) ->
+  removeTabsPred ((t, ct) -> !t.pinned and t.index < ct.index), cb
+
+# Close tabs to the right of the active tab
+closeTabsRight = (cb) ->
+  removeTabsPred ((t, ct) -> !t.pinned and t.index > ct.index), cb
+
+# Close other tabs
+onlyTab = (cb) ->
+  removeTabsPred ((t, ct) -> !t.pinned and t.id isnt ct.id), cb
+
+moveTab = (cb, pred) ->
+  getCurrentTab (tab) ->
+    chrome.tabs.move tab.id, { index: pred(tab) }, cb
+
+moveTabEnd = (cb) ->
+  moveTab cb, (tab) -> -1
+
+moveTabStart = (cb) ->
+  moveTab cb, (tab) -> 0
+
+moveTabRight = (cb) ->
+  moveTab cb, (tab) -> tab.index + 1
+
+moveTabLeft = (cb) ->
+  moveTab cb, (tab) -> tab.index - 1
 
 # Start action functions
 
@@ -238,8 +282,13 @@ BackgroundCommands =
   previousTab: (callback) -> selectTab(callback, "previous")
   firstTab: (callback) -> selectTab(callback, "first")
   lastTab: (callback) -> selectTab(callback, "last")
-  moveTabLeft: (callback) -> moveTab(callback, -1)
-  moveTabRight: (callback) -> moveTab(callback, 1)
+  onlyTab: onlyTab
+  closeTabsLeft: closeTabsLeft
+  closeTabsRight: closeTabsRight
+  moveTabStart: moveTabStart
+  moveTabEnd: moveTabEnd
+  moveTabLeft: moveTabLeft
+  moveTabRight: moveTabRight
   removeTab: ->
     chrome.tabs.getSelected(null, (tab) ->
       chrome.tabs.remove(tab.id))
