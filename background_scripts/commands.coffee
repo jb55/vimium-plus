@@ -114,7 +114,6 @@ Commands =
        "onlyTab"
        "previousTab"
        "removeTab"
-       "removeTab",
        "restoreTab"
        "togglePinTab"
       ]
