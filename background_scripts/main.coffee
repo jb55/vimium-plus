@@ -248,13 +248,15 @@ onlyTab = (cb) ->
 
 moveTab = (cb, pred) ->
   getCurrentTab (tab) ->
-    chrome.tabs.move tab.id, { index: pred(tab) }, cb
+    chrome.tabs.move tab.id, { index: pred(tab) }
 
 moveTabEnd = (cb) ->
   moveTab cb, (tab) -> -1
 
 moveTabStart = (cb) ->
-  moveTab cb, (tab) -> 0
+  getCurrentTab (currentTab) ->
+    chrome.tabs.query { pinned: true, currentWindow: true }, (pinned) ->
+      chrome.tabs.move currentTab.id, { index: pinned.length }
 
 moveTabRight = (cb) ->
   moveTab cb, (tab) -> tab.index + 1
