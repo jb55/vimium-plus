@@ -8,7 +8,7 @@ window.handlerStack = new HandlerStack
 
 insertModeLock = null
 findMode = false
-findModeQuery = { rawQuery: "" }
+findModeQuery = { rawQuery: "", matchCount: 0 }
 findModeQueryHasResults = false
 findModeAnchorNode = null
 isShowingHelpDialog = false
@@ -433,7 +433,10 @@ onKeydown = (event) ->
       isValidFirstKey(KeyboardUtils.getKeyChar(event))))
     event.stopPropagation()
 
-onKeyup = (event) -> return unless handlerStack.bubbleEvent('keyup', event)
+onKeyup = (event) ->
+  return unless handlerStack.bubbleEvent("keyup", event)
+  # Don't propagate the keyup to the underlying page, since Vimium has handled it. See #733.
+  event.stopPropagation() unless isInsertMode()
 
 checkIfEnabledForUrl = ->
   url = window.location.toString()
@@ -554,6 +557,18 @@ updateFindModeQuery = ->
     text = document.body.innerText
     findModeQuery.regexMatches = text.match(pattern)
     findModeQuery.activeRegexIndex = 0
+    findModeQuery.matchCount = findModeQuery.regexMatches?.length
+  # if we are doing a basic plain string match, we still want to grep for matches of the string, so we can
+  # show a the number of results. We can grep on document.body.innerText, as it should be indistinguishable
+  # from the internal representation used by window.find.
+  else
+    # escape all special characters, so RegExp just parses the string 'as is'.
+    # Taken from http://stackoverflow.com/questions/3446170/escape-string-for-use-in-javascript-regex
+    escapeRegExp = /[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g
+    parsedNonRegexQuery = findModeQuery.parsedQuery.replace(escapeRegExp, (char) -> "\\" + char)
+    pattern = new RegExp(parsedNonRegexQuery, "g" + (if findModeQuery.ignoreCase then "i" else ""))
+    text = document.body.innerText
+    findModeQuery.matchCount = text.match(pattern)?.length
 
 handleKeyCharForFindMode = (keyChar) ->
   findModeQuery.rawQuery += keyChar
@@ -799,7 +814,7 @@ findAndFollowRel = (value) ->
   for tag in relTags
     elements = document.getElementsByTagName(tag)
     for element in elements
-      if (element.hasAttribute("rel") && element.rel == value)
+      if (element.hasAttribute("rel") && element.rel.toLowerCase() == value)
         followLink(element)
         return true
 
@@ -815,7 +830,7 @@ window.goNext = ->
 
 showFindModeHUDForQuery = ->
   if (findModeQueryHasResults || findModeQuery.parsedQuery.length == 0)
-    HUD.show("/" + findModeQuery.rawQuery)
+    HUD.show("/" + findModeQuery.rawQuery + " (" + findModeQuery.matchCount + " Matches)")
   else
     HUD.show("/" + findModeQuery.rawQuery + " (No Matches)")
 
@@ -869,8 +884,9 @@ window.showHelpDialog = (html, fid) ->
 
   VimiumHelpDialog.init()
 
-  container.getElementsByClassName("optionsPage")[0].addEventListener("click",
-    -> chrome.runtime.sendMessage({ handler: "openOptionsPageInNewTab" })
+  container.getElementsByClassName("optionsPage")[0].addEventListener("click", (clickEvent) ->
+      clickEvent.preventDefault()
+      chrome.runtime.sendMessage({handler: "openOptionsPageInNewTab"})
     false)
 
 
@@ -917,7 +933,7 @@ HUD =
     HUD.upgradeNotificationElement().innerHTML = "Vimium has been updated to
       <a class='vimiumReset'
       href='https://chrome.google.com/extensions/detail/dbepggeogbaibhgnhhndojpepiihcmeb'>
-      #{version}</a>.<a class='vimiumReset close-button' href='#'>x</a>"
+      #{version}</a>.<a class='vimiumReset close-button' href='#'>&times;</a>"
     links = HUD.upgradeNotificationElement().getElementsByTagName("a")
     links[0].addEventListener("click", HUD.onUpdateLinkClicked, false)
     links[1].addEventListener "click", (event) ->

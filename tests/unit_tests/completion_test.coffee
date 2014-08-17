@@ -23,6 +23,26 @@ context "bookmark completer",
     results = filterCompleter(@completer, ["mark2"])
     assert.arrayEqual [@bookmark2.url], results.map (suggestion) -> suggestion.url
 
+  should "return *no* matching bookmarks when there is no match", ->
+    @completer.refresh()
+    results = filterCompleter(@completer, ["does-not-match"])
+    assert.arrayEqual [], results.map (suggestion) -> suggestion.url
+
+  should "construct bookmark paths correctly", ->
+    @completer.refresh()
+    results = filterCompleter(@completer, ["mark2"])
+    assert.equal "/bookmark1/bookmark2", @bookmark2.pathAndTitle
+
+  should "return matching bookmark *titles* when searching *without* the folder separator character", ->
+    @completer.refresh()
+    results = filterCompleter(@completer, ["mark2"])
+    assert.arrayEqual ["bookmark2"], results.map (suggestion) -> suggestion.title
+
+  should "return matching bookmark *paths* when searching with the folder separator character", ->
+    @completer.refresh()
+    results = filterCompleter(@completer, ["/bookmark1", "mark2"])
+    assert.arrayEqual ["/bookmark1/bookmark2"], results.map (suggestion) -> suggestion.title
+
 context "HistoryCache",
   context "binary search",
     setup ->
@@ -209,6 +229,20 @@ context "tab completer",
     assert.arrayEqual ["tab2.com"], results.map (tab) -> tab.url
     assert.arrayEqual [2], results.map (tab) -> tab.tabId
 
+context "search engines",
+  setup ->
+    searchEngines = "foo: bar?q=%s\n# comment\nbaz: qux?q=%s"
+    Settings.set 'searchEngines', searchEngines
+    @completer = new SearchEngineCompleter()
+    # note, I couldn't just call @completer.refresh() here as I couldn't set root.Settings without errors
+    # workaround is below, would be good for someone that understands the testing system better than me to improve
+    @completer.searchEngines = Settings.getSearchEngines()
+
+  should "return search engine suggestion", ->
+    results = filterCompleter(@completer, ["foo", "hello"])
+    assert.arrayEqual ["bar?q=hello"], results.map (result) -> result.url
+    assert.arrayEqual ["foo: hello"], results.map (result) -> result.title
+
 context "suggestions",
   should "escape html in page titles", ->
     suggestion = new Suggestion(["queryterm"], "tab", "url", "title <span>", returns(1))
@@ -228,6 +262,50 @@ context "suggestions",
     suggestion = new Suggestion(["queryterm"], "tab", "http://ninjawords.com", "ninjawords", returns(1))
     assert.equal -1, suggestion.generateHtml().indexOf("http://ninjawords.com")
 
+context "RankingUtils.wordRelevancy",
+  should "score higher in shorter URLs", ->
+    highScore = RankingUtils.wordRelevancy(["stack"], "http://stackoverflow.com/short",  "a-title")
+    lowScore  = RankingUtils.wordRelevancy(["stack"], "http://stackoverflow.com/longer", "a-title")
+    assert.isTrue highScore > lowScore
+
+  should "score higher in shorter titles", ->
+    highScore = RankingUtils.wordRelevancy(["coffee"], "a-url", "Coffeescript")
+    lowScore  = RankingUtils.wordRelevancy(["coffee"], "a-url", "Coffeescript rocks")
+    assert.isTrue highScore > lowScore
+
+  should "score higher for matching the start of a word (in a URL)", ->
+    lowScore  = RankingUtils.wordRelevancy(["stack"], "http://Xstackoverflow.com/same", "a-title")
+    highScore = RankingUtils.wordRelevancy(["stack"], "http://stackoverflowX.com/same", "a-title")
+    assert.isTrue highScore > lowScore
+
+  should "score higher for matching the start of a word (in a title)", ->
+    lowScore  = RankingUtils.wordRelevancy(["te"], "a-url", "Dist racted")
+    highScore = RankingUtils.wordRelevancy(["te"], "a-url", "Distrac ted")
+    assert.isTrue highScore > lowScore
+
+  should "score higher for matching a whole word (in a URL)", ->
+    lowScore  = RankingUtils.wordRelevancy(["com"], "http://stackoverflow.comX/same", "a-title")
+    highScore = RankingUtils.wordRelevancy(["com"], "http://stackoverflowX.com/same", "a-title")
+    assert.isTrue highScore > lowScore
+
+  should "score higher for matching a whole word (in a title)", ->
+    lowScore  = RankingUtils.wordRelevancy(["com"], "a-url", "abc comX")
+    highScore = RankingUtils.wordRelevancy(["com"], "a-url", "abcX com")
+    assert.isTrue highScore > lowScore
+
+  # # TODO: (smblott)
+  # #       Word relevancy should take into account the number of matches (it doesn't currently).
+  # should "score higher for multiple matches (in a URL)", ->
+  #   lowScore  = RankingUtils.wordRelevancy(["stack"], "http://stackoverflow.com/Xxxxxx", "a-title")
+  #   highScore = RankingUtils.wordRelevancy(["stack"], "http://stackoverflow.com/Xstack", "a-title")
+  #   assert.isTrue highScore > lowScore
+
+  # should "score higher for multiple matches (in a title)", ->
+  #   lowScore  = RankingUtils.wordRelevancy(["bbc"], "http://stackoverflow.com/same", "BBC Radio 4 (XBCr4)")
+  #   highScore = RankingUtils.wordRelevancy(["bbc"], "http://stackoverflow.com/same", "BBC Radio 4 (BBCr4)")
+  #   assert.isTrue highScore > lowScore
+
+context "Suggestion.pushMatchingRanges",
   should "extract ranges matching term (simple case, two matches)", ->
     ranges = []
     [ one, two, three ] = [ "one", "two", "three" ]

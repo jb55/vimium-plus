@@ -102,6 +102,7 @@ class Suggestion
 
 
 class BookmarkCompleter
+  folderSeparator: "/"
   currentSearch: null
   # These bookmarks are loaded asynchronously when refresh() is called.
   bookmarks: null
@@ -113,14 +114,19 @@ class BookmarkCompleter
   onBookmarksLoaded: -> @performSearch() if @currentSearch
 
   performSearch: ->
+    # If the folder separator character the first character in any query term, then we'll use the bookmark's full path as its title.
+    # Otherwise, we'll just use the its regular title.
+    usePathAndTitle = @currentSearch.queryTerms.reduce ((prev,term) => prev || term.indexOf(@folderSeparator) == 0), false
     results =
       if @currentSearch.queryTerms.length > 0
         @bookmarks.filter (bookmark) =>
-          RankingUtils.matches(@currentSearch.queryTerms, bookmark.url, bookmark.title)
+          suggestionTitle = if usePathAndTitle then bookmark.pathAndTitle else bookmark.title
+          RankingUtils.matches(@currentSearch.queryTerms, bookmark.url, suggestionTitle)
       else
         []
     suggestions = results.map (bookmark) =>
-      new Suggestion(@currentSearch.queryTerms, "bookmark", bookmark.url, bookmark.title, @computeRelevancy)
+      suggestionTitle = if usePathAndTitle then bookmark.pathAndTitle else bookmark.title
+      new Suggestion(@currentSearch.queryTerms, "bookmark", bookmark.url, suggestionTitle, @computeRelevancy)
     onComplete = @currentSearch.onComplete
     @currentSearch = null
     onComplete(suggestions)
@@ -131,15 +137,28 @@ class BookmarkCompleter
       @bookmarks = @traverseBookmarks(bookmarks).filter((bookmark) -> bookmark.url?)
       @onBookmarksLoaded()
 
-  # Traverses the bookmark hierarchy, and retuns a flattened list of all bookmarks in the tree.
+  # If these names occur as top-level bookmark names, then they are not included in the names of bookmark folders.
+  ignoreTopLevel:
+    'Other Bookmarks': true
+    'Mobile Bookmarks': true
+    'Bookmarks Bar': true
+
+  # Traverses the bookmark hierarchy, and returns a flattened list of all bookmarks.
   traverseBookmarks: (bookmarks) ->
     results = []
-    toVisit = bookmarks.reverse()
-    while toVisit.length > 0
-      bookmark = toVisit.pop()
-      results.push(bookmark)
-      toVisit.push.apply(toVisit, bookmark.children.reverse()) if (bookmark.children)
+    bookmarks.forEach (folder) =>
+      @traverseBookmarksRecursive folder, results
     results
+
+  # Recursive helper for `traverseBookmarks`.
+  traverseBookmarksRecursive: (bookmark, results, parent={pathAndTitle:""}) ->
+    bookmark.pathAndTitle =
+      if bookmark.title and not (parent.pathAndTitle == "" and @ignoreTopLevel[bookmark.title])
+        parent.pathAndTitle + @folderSeparator + bookmark.title
+      else
+        parent.pathAndTitle
+    results.push bookmark
+    bookmark.children.forEach((child) => @traverseBookmarksRecursive child, results, bookmark) if bookmark.children
 
   computeRelevancy: (suggestion) ->
     RankingUtils.wordRelevancy(suggestion.queryTerms, suggestion.url, suggestion.title)
@@ -248,6 +267,27 @@ class TabCompleter
   computeRelevancy: (suggestion) ->
     RankingUtils.wordRelevancy(suggestion.queryTerms, suggestion.url, suggestion.title)
 
+# A completer which will return your search engines
+class SearchEngineCompleter
+  searchEngines: {}
+
+  filter: (queryTerms, onComplete) ->
+    searchEngineMatch = this.getSearchEngineMatches(queryTerms[0])
+    suggestions = []
+    if searchEngineMatch
+      searchEngineMatch = searchEngineMatch.replace(/%s/g, queryTerms[1..].join(" "))
+      suggestion = new Suggestion(queryTerms, "search", searchEngineMatch, queryTerms[0] + ": " + queryTerms[1..].join(" "), @computeRelevancy)
+      suggestions.push(suggestion)
+    onComplete(suggestions)
+
+  computeRelevancy: -> 1
+
+  refresh: ->
+    this.searchEngines = root.Settings.getSearchEngines()
+
+  getSearchEngineMatches: (queryTerm) ->
+    this.searchEngines[queryTerm]
+
 # A completer which calls filter() on many completers, aggregates the results, ranks them, and returns the top
 # 10. Queries from the vomnibar frontend script come through a multi completer.
 class MultiCompleter
@@ -296,23 +336,78 @@ RankingUtils =
       return false unless matchedTerm
     true
 
+  # Weights used for scoring matches.
+  matchWeights:
+    matchAnywhere:     1
+    matchStartOfWord:  1
+    matchWholeWord:    1
+    # The following must be the sum of the three weights above; it is used for normalization.
+    maximumScore:      3
+    #
+    # Calibration factor for balancing word relevancy and recency.
+    recencyCalibrator: 2.0/3.0
+    # The current value of 2.0/3.0 has the effect of:
+    #   - favoring the contribution of recency when matches are not on word boundaries ( because 2.0/3.0 > (1)/3     )
+    #   - favoring the contribution of word relevance when matches are on whole words  ( because 2.0/3.0 < (1+1+1)/3 )
+
+  # Calculate a score for matching term against string.
+  # The score is in the range [0, matchWeights.maximumScore], see above.
+  # Returns: [ score, count ], where count is the number of matched characters in string.
+  scoreTerm: (term, string) ->
+    score = 0
+    count = 0
+    nonMatching = string.split(RegexpCache.get term)
+    if nonMatching.length > 1
+      # Have match.
+      score = RankingUtils.matchWeights.matchAnywhere
+      count = nonMatching.reduce(((p,c) -> p - c.length), string.length)
+      if RegexpCache.get(term, "\\b").test string
+        # Have match at start of word.
+        score += RankingUtils.matchWeights.matchStartOfWord
+        if RegexpCache.get(term, "\\b", "\\b").test string
+          # Have match of whole word.
+          score += RankingUtils.matchWeights.matchWholeWord
+    [ score, if count < string.length then count else string.length ]
+
   # Returns a number between [0, 1] indicating how often the query terms appear in the url and title.
   wordRelevancy: (queryTerms, url, title) ->
-    queryLength = 0
-    urlScore = 0.0
-    titleScore = 0.0
+    urlScore = titleScore = 0.0
+    urlCount = titleCount = 0
+    # Calculate initial scores.
     for term in queryTerms
-      queryLength += term.length
-      urlScore += 1 if url && RankingUtils.matches [term], url
-      titleScore += 1 if title && RankingUtils.matches [term], title
-    urlScore = urlScore / queryTerms.length
-    urlScore = urlScore * RankingUtils.normalizeDifference(queryLength, url.length)
+      [ s, c ] = RankingUtils.scoreTerm term, url
+      urlScore += s
+      urlCount += c
+      if title
+        [ s, c ] = RankingUtils.scoreTerm term, title
+        titleScore += s
+        titleCount += c
+
+    maximumPossibleScore = RankingUtils.matchWeights.maximumScore * queryTerms.length
+
+    # Normalize scores.
+    urlScore /= maximumPossibleScore
+    urlScore *= RankingUtils.normalizeDifference urlCount, url.length
+
     if title
-      titleScore = titleScore / queryTerms.length
-      titleScore = titleScore * RankingUtils.normalizeDifference(queryLength, title.length)
+      titleScore /= maximumPossibleScore
+      titleScore *= RankingUtils.normalizeDifference titleCount, title.length
     else
       titleScore = urlScore
+
+    # Prefer matches in the title over matches in the URL.
+    # In other words, don't let a poor urlScore pull down the titleScore.
+    # For example, urlScore can be unreasonably poor if the URL is very long.
+    urlScore = titleScore if urlScore < titleScore
+
+    # Return the average.
     (urlScore + titleScore) / 2
+
+    # Untested alternative to the above:
+    #   - Don't let a poor urlScore pull down a good titleScore, and don't let a poor titleScore pull down a
+    #     good urlScore.
+    #
+    # return Math.max(urlScore, titleScore)
 
   # Returns a score between [0, 1] which indicates how recent the given timestamp is. Items which are over
   # a month old are counted as 0. This range is quadratic, so an item from one day ago has a much stronger
@@ -325,6 +420,9 @@ RankingUtils =
     # recencyScore is between [0, 1]. It is 1 when recenyDifference is 0. This quadratic equation will
     # incresingly discount older history entries.
     recencyScore = recencyDifference * recencyDifference * recencyDifference
+
+    # Calibrate recencyScore vis-a-vis word-relevancy scores.
+    recencyScore *= RankingUtils.matchWeights.recencyCalibrator
 
   # Takes the difference of two numbers and returns a number between [0, 1] (the percentage difference).
   normalizeDifference: (a, b) ->
@@ -436,6 +534,7 @@ root.MultiCompleter = MultiCompleter
 root.HistoryCompleter = HistoryCompleter
 root.DomainCompleter = DomainCompleter
 root.TabCompleter = TabCompleter
+root.SearchEngineCompleter = SearchEngineCompleter
 root.HistoryCache = HistoryCache
 root.RankingUtils = RankingUtils
 root.RegexpCache = RegexpCache

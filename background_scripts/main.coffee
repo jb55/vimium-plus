@@ -24,9 +24,11 @@ completionSources =
   history: new HistoryCompleter()
   domains: new DomainCompleter()
   tabs: new TabCompleter()
+  seachEngines: new SearchEngineCompleter()
 
 completers =
   omni: new MultiCompleter([
+    completionSources.seachEngines,
     completionSources.bookmarks,
     completionSources.history,
     completionSources.domains])
@@ -223,8 +225,7 @@ getAllTabs = (cb) ->
   , cb
 
 getCurrentTab = (cb) ->
-  chrome.tabs.query { currentWindow: true, active: true }, (tabs) ->
-    cb tabs[0]
+  chrome.tabs.getSelected(null, cb)
 
 removeTabsPred = (pred, cb) ->
   getCurrentTab (currentTab) ->
@@ -250,6 +251,11 @@ moveTab = (cb, pred) ->
   getCurrentTab (tab) ->
     chrome.tabs.move tab.id, { index: pred(tab) }
 
+moveTabDirection = (cb, count) ->
+  # Use Math.max to prevent -1 as the new index, otherwise the tab of index n will wrap to the far RHS when
+  # moved left by exactly (n+1) places.
+  moveTab cb, (tab) -> Math.max(0, count)
+
 moveTabEnd = (cb) ->
   moveTab cb, (tab) -> -1
 
@@ -257,12 +263,6 @@ moveTabStart = (cb) ->
   getCurrentTab (currentTab) ->
     chrome.tabs.query { pinned: true, currentWindow: true }, (pinned) ->
       chrome.tabs.move currentTab.id, { index: pinned.length }
-
-moveTabRight = (cb) ->
-  moveTab cb, (tab) -> tab.index + 1
-
-moveTabLeft = (cb) ->
-  moveTab cb, (tab) -> tab.index - 1
 
 # Start action functions
 
@@ -275,8 +275,9 @@ BackgroundCommands =
       chrome.tabs.duplicate(tab.id)
       selectionChangedHandlers.push(callback))
   moveTabToNewWindow: (callback) ->
-    chrome.tabs.getSelected(null, (tab) ->
-      chrome.windows.create({tabId: tab.id}))
+    chrome.tabs.query {active: true, currentWindow: true}, (tabs) ->
+      tab = tabs[0]
+      chrome.windows.create {tabId: tab.id, incognito: tab.incognito}
   nextTab: (callback) -> selectTab(callback, "next")
   previousTab: (callback) -> selectTab(callback, "previous")
   firstTab: (callback) -> selectTab(callback, "first")
@@ -286,16 +287,15 @@ BackgroundCommands =
   closeTabsRight: closeTabsRight
   moveTabStart: moveTabStart
   moveTabEnd: moveTabEnd
-  moveTabLeft: moveTabLeft
-  moveTabRight: moveTabRight
+  moveTabLeft: (count) -> moveTabDirection(null, -count)
+  moveTabRight: (count) -> moveTabDirection(null, count)
   removeTab: ->
     chrome.tabs.getSelected(null, (tab) ->
       chrome.tabs.remove(tab.id))
   restoreTab: (callback) ->
     # TODO: remove if-else -block when adopted into stable
-    if chrome.sessionRestore
-      chrome.sessionRestore.getRecentlyClosed((closed) ->
-        chrome.sessionRestore.restore(closed[0]))
+    if chrome.sessions
+      chrome.sessions.restore(null, (restoredSession) -> callback())
     else
       # TODO(ilya): Should this be getLastFocused instead?
       chrome.windows.getCurrent((window) ->

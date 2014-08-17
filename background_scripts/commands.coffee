@@ -189,6 +189,8 @@ defaultKeyMappings =
   "J": "previousTab"
   "gt": "nextTab"
   "gT": "previousTab"
+  "<<": "moveTabLeft"
+  ">>": "moveTabRight"
   "g0": "firstTab"
   "g$": "lastTab"
 
@@ -205,7 +207,7 @@ defaultKeyMappings =
   "wL": "closeTabsRight"
   "X": "restoreTab"
 
-  ".": "togglePinTab"
+  "<a-p>": "togglePinTab"
 
   "o": "Vomnibar.activate"
   "O": "Vomnibar.activateInNewTab"
@@ -249,7 +251,8 @@ commandDescriptions =
 
   enterInsertMode: ["Enter insert mode"]
 
-  focusInput: ["Focus the first (or n-th) text box on the page", { passCountToFunction: true }]
+  focusInput: ["Focus the first text box on the page. Cycle between them using tab",
+    { passCountToFunction: true }]
 
   "LinkHints.activateMode": ["Open a link in the current tab"]
   "LinkHints.activateModeToOpenInNewTab": ["Open a link in a new tab"]

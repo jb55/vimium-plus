@@ -122,6 +122,10 @@
         width: 100%;
         min-height: 135px;
       }
+      textarea#searchEngines {
+        width: 100%;
+        min-height: 135px;
+      }
       input#previousPatterns, input#nextPatterns {
         width: 100%;
       }
@@ -326,14 +330,30 @@ unmapAll
             </td>
           </tr>
           <tr>
-            <td class="caption">Search</td>
+            <td class="caption">Default Search<br/>Engine</td>
             <td verticalAlign="top">
                 <div class="help">
                   <div class="example">
-                    Set which search engine is used when searching from the Vomnibar (examples: "http://duckduckgo.com/?q=", "http://www.google.com/search?q=").
+                    The search engine which is used when searching from the Vomnibar
+                    (e.g.: "http://duckduckgo.com/?q=").
                   </div>
                 </div>
                 <input id="searchUrl" type="text" />
+            </td>
+          </tr>
+          <tr>
+            <td class="caption">Custom Search<br/>Engines</td>
+            <td verticalAlign="top">
+                <div class="help">
+                  <div class="example">
+                    Use this to add shortcuts for your common search engines when using the Vomnibar.<br/><br/>
+                    The format is:<br/>
+                    <pre>your-keyword: http://the-site.com/?q=%s</pre>
+                    %s will be replaced with your search term.<br/>
+                    Lines which start with "#" are comments.
+                  </div>
+                </div>
+                <textarea id="searchEngines"></textarea>
             </td>
           </tr>
         </tbody>
