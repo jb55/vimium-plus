@@ -1,14 +1,32 @@
 root = exports ? window
 
-currentVersion = Utils.getCurrentVersion()
+# The browser may have tabs already open. We inject the content scripts immediately so that they work straight
+# away.
+chrome.runtime.onInstalled.addListener ({ reason }) ->
+  # See https://developer.chrome.com/extensions/runtime#event-onInstalled
+  return if reason in [ "chrome_update", "shared_module_update" ]
+  manifest = chrome.runtime.getManifest()
+  # Content scripts loaded on every page should be in the same group. We assume it is the first.
+  contentScripts = manifest.content_scripts[0]
+  jobs = [ [ chrome.tabs.executeScript, contentScripts.js ], [ chrome.tabs.insertCSS, contentScripts.css ] ]
+  # Chrome complains if we don't evaluate chrome.runtime.lastError on errors (and we get errors for tabs on
+  # which Vimium cannot run).
+  checkLastRuntimeError = -> chrome.runtime.lastError
+  chrome.tabs.query { status: "complete" }, (tabs) ->
+    for tab in tabs
+      for [ func, files ] in jobs
+        for file in files
+          func tab.id, { file: file, allFrames: contentScripts.allFrames }, checkLastRuntimeError
 
+currentVersion = Utils.getCurrentVersion()
 tabQueue = {} # windowId -> Array
 tabInfoMap = {} # tabId -> object with various tab properties
 keyQueue = "" # Queue of keys typed
 validFirstKeys = {}
 singleKeyCommands = []
 focusedFrame = null
-framesForTab = {}
+frameIdsForTab = {}
+root.urlForTab = {}
 
 # Keys are either literal characters, or "named" - for example <a-b> (alt+b), <left> (left arrow) or <f12>
 # This regular expression captures two groups: the first is a named key, the second is the remainder of
@@ -19,21 +37,28 @@ namedKeyRegex = /^(<(?:[amc]-.|(?:[amc]-)?[a-z0-9]{2,5})>)(.*)$/
 selectionChangedHandlers = []
 tabLoadedHandlers = {} # tabId -> function()
 
+# A secret, available only within the current instantiation of Vimium.  The secret is big, likely unguessable
+# in practice, but less than 2^31.
+chrome.storage.local.set
+  vimiumSecret: Math.floor Math.random() * 2000000000
+
 completionSources =
   bookmarks: new BookmarkCompleter()
   history: new HistoryCompleter()
   domains: new DomainCompleter()
   tabs: new TabCompleter()
+  seachEngines: new SearchEngineCompleter()
 
 completers =
   omni: new MultiCompleter([
+    completionSources.seachEngines,
     completionSources.bookmarks,
     completionSources.history,
     completionSources.domains])
   bookmarks: new MultiCompleter([completionSources.bookmarks])
   tabs: new MultiCompleter([completionSources.tabs])
 
-chrome.runtime.onConnect.addListener((port, name) ->
+chrome.runtime.onConnect.addListener (port, name) ->
   senderTabId = if port.sender.tab then port.sender.tab.id else null
   # If this is a tab we've been waiting to open, execute any "tab loaded" handlers, e.g. to restore
   # the tab's scroll position. Wait until domReady before doing this; otherwise operations like restoring
@@ -45,14 +70,8 @@ chrome.runtime.onConnect.addListener((port, name) ->
       delete tabLoadedHandlers[senderTabId]
       toCall.call()
 
-    # domReady is the appropriate time to show the "vimium has been upgraded" message.
-    # TODO: This might be broken on pages with frames.
-    if (shouldShowUpgradeMessage())
-      chrome.tabs.sendMessage(senderTabId, { name: "showUpgradeNotification", version: currentVersion })
-
   if (portHandlers[port.name])
     port.onMessage.addListener(portHandlers[port.name])
-)
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) ->
   if (sendRequestHandlers[request.handler])
@@ -67,33 +86,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) ->
 getCurrentTabUrl = (request, sender) -> sender.tab.url
 
 #
-# Checks the user's preferences in local storage to determine if Vimium is enabled for the given URL.
+# Checks the user's preferences in local storage to determine if Vimium is enabled for the given URL, and
+# whether any keys should be passed through to the underlying page.
+# The source frame also informs us whether or not it has the focus, which allows us to track the URL of the
+# active frame.
 #
-isEnabledForUrl = (request) ->
-  # excludedUrls are stored as a series of URL expressions separated by newlines.
-  excludedUrls = Settings.get("excludedUrls").split("\n")
-  isEnabled = true
-  for url in excludedUrls
-    # The user can add "*" to the URL which means ".*"
-    regexp = new RegExp("^" + url.replace(/\*/g, ".*") + "$")
-    isEnabled = false if request.url.match(regexp)
-  { isEnabledForUrl: isEnabled }
+root.isEnabledForUrl = isEnabledForUrl = (request, sender) ->
+  urlForTab[sender.tab.id] = request.url if request.frameIsFocused
+  rule = Exclusions.getRule(request.url)
+  {
+    isEnabledForUrl: not rule or rule.passKeys
+    passKeys: rule?.passKeys or ""
+  }
 
-# Called by the popup UI. Strips leading/trailing whitespace and ignores empty strings.
-root.addExcludedUrl = (url) ->
-  return unless url = url.trim()
+onURLChange = (details) ->
+  chrome.tabs.sendMessage details.tabId, name: "checkEnabledAfterURLChange"
 
-  excludedUrls = Settings.get("excludedUrls")
-  return if excludedUrls.indexOf(url) >= 0
-
-  excludedUrls += "\n" + url
-  Settings.set("excludedUrls", excludedUrls)
-
-  chrome.tabs.query({ windowId: chrome.windows.WINDOW_ID_CURRENT, active: true },
-    (tabs) -> updateActiveState(tabs[0].id))
-
-saveHelpDialogSettings = (request) ->
-  Settings.set("helpDialog_showAdvancedCommands", request.showAdvancedCommands)
+# Re-check whether Vimium is enabled for a frame when the url changes without a reload.
+chrome.webNavigation.onHistoryStateUpdated.addListener onURLChange # history.pushState.
+chrome.webNavigation.onReferenceFragmentUpdated.addListener onURLChange # Hash changed.
 
 # Retrieves the help dialog HTML template from a file, and populates it with the latest keybindings.
 # This is called by options.coffee.
@@ -160,25 +171,27 @@ openUrlInCurrentTab = (request) ->
 #
 # Opens request.url in new tab and switches to it if request.selected is true.
 #
-openUrlInNewTab = (request) ->
-  chrome.tabs.getSelected(null, (tab) ->
-    chrome.tabs.create({ url: Utils.convertToUrl(request.url), index: tab.index + 1, selected: true }))
+openUrlInNewTab = (request, callback) ->
+  chrome.tabs.getSelected null, (tab) ->
+    tabConfig =
+      url: Utils.convertToUrl request.url
+      index: tab.index + 1
+      selected: true
+      windowId: tab.windowId
+    # FIXME(smblott). openUrlInNewTab is being called in two different ways with different arguments.  We
+    # should refactor it such that this check on callback isn't necessary.
+    callback = (->) unless typeof callback == "function"
+    chrome.tabs.create tabConfig, callback
 
 openUrlInIncognito = (request) ->
   chrome.windows.create({ url: Utils.convertToUrl(request.url), incognito: true})
 
 #
-# Called when the user has clicked the close icon on the "Vimium has been updated" message.
-# We should now dismiss that message in all tabs.
+# Copies or pastes some data (request.data) to/from the clipboard.
+# We return null to avoid the return value from the copy operations being passed to sendResponse.
 #
-upgradeNotificationClosed = (request) ->
-  Settings.set("previousVersion", currentVersion)
-  sendRequestToAllTabs({ name: "hideUpgradeNotification" })
-
-#
-# Copies some data (request.data) to the clipboard.
-#
-copyToClipboard = (request) -> Clipboard.copy(request.data)
+copyToClipboard = (request) -> Clipboard.copy(request.data); null
+pasteFromClipboard = (request) -> Clipboard.paste(); null
 
 #
 # Selects the tab with the ID specified in request.id
@@ -191,12 +204,16 @@ selectSpecificTab = (request) ->
 #
 # Used by the content scripts to get settings from the local storage.
 #
-handleSettings = (args, port) ->
-  if (args.operation == "get")
-    value = Settings.get(args.key)
-    port.postMessage({ key: args.key, value: value })
-  else # operation == "set"
-    Settings.set(args.key, args.value)
+handleSettings = (request, port) ->
+  switch request.operation
+    when "get" # Get a single settings value.
+      port.postMessage key: request.key, value: Settings.get request.key
+    when "set" # Set a single settings value.
+      Settings.set request.key, request.value
+    when "fetch" # Fetch multiple settings values.
+      values = request.values
+      values[key] = Settings.get key for own key of values
+      port.postMessage { values }
 
 refreshCompleter = (request) -> completers[request.name].refresh()
 
@@ -204,8 +221,6 @@ whitespaceRegexp = /\s+/
 filterCompleter = (args, port) ->
   queryTerms = if (args.query == "") then [] else args.query.split(whitespaceRegexp)
   completers[args.name].filter(queryTerms, (results) -> port.postMessage({ id: args.id, results: results }))
-
-getCurrentTimeInSeconds = -> Math.floor((new Date()).getTime() / 1000)
 
 chrome.tabs.onSelectionChanged.addListener (tabId, selectionInfo) ->
   if (selectionChangedHandlers.length > 0)
@@ -269,14 +284,22 @@ moveTabLeft = (cb) ->
 # These are commands which are bound to keystroke which must be handled by the background page. They are
 # mapped in commands.coffee.
 BackgroundCommands =
-  createTab: (callback) -> chrome.tabs.create({ url: "chrome://newtab" }, (tab) -> callback())
+  createTab: (callback) ->
+    chrome.tabs.query { active: true, currentWindow: true }, (tabs) ->
+      tab = tabs[0]
+      url = Settings.get "newTabUrl"
+      if url == "pages/blank.html"
+        # "pages/blank.html" does not work in incognito mode, so fall back to "chrome://newtab" instead.
+        url = if tab.incognito then "chrome://newtab" else chrome.runtime.getURL url
+      openUrlInNewTab { url }, callback
   duplicateTab: (callback) ->
     chrome.tabs.getSelected(null, (tab) ->
       chrome.tabs.duplicate(tab.id)
       selectionChangedHandlers.push(callback))
   moveTabToNewWindow: (callback) ->
-    chrome.tabs.getSelected(null, (tab) ->
-      chrome.windows.create({tabId: tab.id}))
+    chrome.tabs.query {active: true, currentWindow: true}, (tabs) ->
+      tab = tabs[0]
+      chrome.windows.create {tabId: tab.id, incognito: tab.incognito}
   nextTab: (callback) -> selectTab(callback, "next")
   previousTab: (callback) -> selectTab(callback, "previous")
   firstTab: (callback) -> selectTab(callback, "first")
@@ -288,14 +311,15 @@ BackgroundCommands =
   moveTabEnd: moveTabEnd
   moveTabLeft: moveTabLeft
   moveTabRight: moveTabRight
-  removeTab: ->
+  removeTab: (callback) ->
     chrome.tabs.getSelected(null, (tab) ->
-      chrome.tabs.remove(tab.id))
+      chrome.tabs.remove(tab.id)
+      selectionChangedHandlers.push(callback))
   restoreTab: (callback) ->
     # TODO: remove if-else -block when adopted into stable
-    if chrome.sessionRestore
-      chrome.sessionRestore.getRecentlyClosed((closed) ->
-        chrome.sessionRestore.restore(closed[0]))
+    if chrome.sessions
+      chrome.sessions.restore(null, (restoredSession) ->
+          callback() unless chrome.runtime.lastError)
     else
       # TODO(ilya): Should this be getLastFocused instead?
       chrome.windows.getCurrent((window) ->
@@ -323,16 +347,44 @@ BackgroundCommands =
     chrome.tabs.getSelected(null, (tab) ->
       chrome.tabs.sendMessage(tab.id,
         { name: "toggleHelpDialog", dialogHtml: helpDialogHtml(), frameId:frameId }))
-  nextFrame: (count) ->
+  moveTabLeft: (count) -> moveTab(null, -count)
+  moveTabRight: (count) -> moveTab(null, count)
+  nextFrame: (count,frameId) ->
     chrome.tabs.getSelected(null, (tab) ->
-      frames = framesForTab[tab.id].frames
-      currIndex = getCurrFrameIndex(frames)
+      frames = frameIdsForTab[tab.id]
+      # We can't always track which frame chrome has focussed, but here we learn that it's frameId; so add an
+      # additional offset such that we do indeed start from frameId.
+      count = (count + Math.max 0, frameIdsForTab[tab.id].indexOf frameId) % frames.length
+      frames = frameIdsForTab[tab.id] = [frames[count..]..., frames[0...count]...]
+      chrome.tabs.sendMessage(tab.id, { name: "focusFrame", frameId: frames[0], highlight: true }))
+  mainFrame: ->
+    chrome.tabs.getSelected null, (tab) ->
+      # The front end interprets a frameId of 0 to mean the main/top from.
+      chrome.tabs.sendMessage tab.id, name: "focusFrame", frameId: 0, highlight: true
 
-      # TODO: Skip the "top" frame (which doesn't actually have a <frame> tag),
-      # since it exists only to contain the other frames.
-      newIndex = (currIndex + count) % frames.length
+  closeTabsOnLeft: -> removeTabsRelative "before"
+  closeTabsOnRight: -> removeTabsRelative "after"
+  closeOtherTabs: -> removeTabsRelative "both"
 
-      chrome.tabs.sendMessage(tab.id, { name: "focusFrame", frameId: frames[newIndex].id, highlight: true }))
+# Remove tabs before, after, or either side of the currently active tab
+removeTabsRelative = (direction) ->
+  chrome.tabs.query {currentWindow: true}, (tabs) ->
+    chrome.tabs.query {currentWindow: true, active: true}, (activeTabs) ->
+      activeTabIndex = activeTabs[0].index
+
+      shouldDelete = switch direction
+        when "before"
+          (index) -> index < activeTabIndex
+        when "after"
+          (index) -> index > activeTabIndex
+        when "both"
+          (index) -> index != activeTabIndex
+
+      toRemove = []
+      for tab in tabs
+        if not tab.pinned and shouldDelete tab.index
+          toRemove.push tab.id
+      chrome.tabs.remove toRemove
 
 # Selects a tab before or after the currently selected tab.
 # - direction: "next", "previous", "first" or "last".
@@ -352,7 +404,7 @@ selectTab = (callback, direction) ->
       selectionChangedHandlers.push(callback)
       chrome.tabs.update(toSelect.id, { selected: true })))
 
-updateOpenTabs = (tab) ->
+updateOpenTabs = (tab, deleteFrames = false) ->
   # Chrome might reuse the tab ID of a recently removed tab.
   if tabInfoMap[tab.id]?.deletor
     clearTimeout tabInfoMap[tab.id].deletor
@@ -364,34 +416,25 @@ updateOpenTabs = (tab) ->
     scrollY: null
     deletor: null
   # Frames are recreated on refresh
-  delete framesForTab[tab.id]
+  delete frameIdsForTab[tab.id] if deleteFrames
 
-# Updates the browserAction icon to indicated whether Vimium is enabled or disabled on the current page.
-# Also disables Vimium if it is currently enabled but should be disabled according to the url blacklist.
-# This lets you disable Vimium on a page without needing to reload.
+# Here's how we set the page icon.  The default is "disabled", so if we do nothing else, then we get the
+# grey-out disabled icon.  Thereafter, we only set tab-specific icons, so there's no need to update the icon
+# when we visit a tab on which Vimium isn't running.
 #
-# Three situations are considered:
-# 1. Active tab is disabled -> disable icon
-# 2. Active tab is enabled and should be enabled -> enable icon
-# 3. Active tab is enabled but should be disabled -> disable icon and disable vimium
-updateActiveState = (tabId) ->
-  enabledIcon = "icons/browser_action_enabled.png"
-  disabledIcon = "icons/browser_action_disabled.png"
-  chrome.tabs.get(tabId, (tab) ->
-    # Default to disabled state in case we can't connect to Vimium, primarily for the "New Tab" page.
-    chrome.browserAction.setIcon({ path: disabledIcon })
-    chrome.tabs.sendMessage(tabId, { name: "getActiveState" }, (response) ->
-      isCurrentlyEnabled = (response? && response.enabled)
-      shouldBeEnabled = isEnabledForUrl({url: tab.url}).isEnabledForUrl
-
-      if (isCurrentlyEnabled)
-        if (shouldBeEnabled)
-          chrome.browserAction.setIcon({ path: enabledIcon })
-        else
-          chrome.browserAction.setIcon({ path: disabledIcon })
-          chrome.tabs.sendMessage(tabId, { name: "disableVimium" })
-      else
-        chrome.browserAction.setIcon({ path: disabledIcon })))
+# For active tabs, when a frame starts, it requests its active state via isEnabledForUrl.  We also check the
+# state every time a frame gets the focus.  In both cases, the frame then updates the tab's icon accordingly.
+#
+# Exclusion rule changes (from either the options page or the page popup) propagate via the subsequent focus
+# change.  In particular, whenever a frame next gets the focus, it requests its new state and sets the icon
+# accordingly.
+#
+setIcon = (request, sender) ->
+  path = switch request.icon
+    when "enabled" then "icons/browser_action_enabled.png"
+    when "partial" then "icons/browser_action_partial.png"
+    when "disabled" then "icons/browser_action_disabled.png"
+  chrome.browserAction.setIcon tabId: sender.tab.id, path: path
 
 handleUpdateScrollPosition = (request, sender) ->
   updateScrollPosition(sender.tab, request.scrollX, request.scrollY)
@@ -402,12 +445,12 @@ updateScrollPosition = (tab, scrollX, scrollY) ->
 
 chrome.tabs.onUpdated.addListener (tabId, changeInfo, tab) ->
   return unless changeInfo.status == "loading" # only do this once per URL change
-  chrome.tabs.insertCSS tabId,
+  cssConf =
     allFrames: true
     code: Settings.get("userDefinedLinkHintCss")
     runAt: "document_start"
-  updateOpenTabs(tab)
-  updateActiveState(tabId)
+  chrome.tabs.insertCSS tabId, cssConf, -> chrome.runtime.lastError
+  updateOpenTabs(tab) if changeInfo.url?
 
 chrome.tabs.onAttached.addListener (tabId, attachedInfo) ->
   # We should update all the tabs in the old window and the new window.
@@ -425,26 +468,27 @@ chrome.tabs.onRemoved.addListener (tabId) ->
   # If we restore pages that content scripts can't run on, they'll ignore Vimium keystrokes when they
   # reappear. Pretend they never existed and adjust tab indices accordingly. Could possibly expand this into
   # a blacklist in the future.
-  if (/^(chrome|view-source:)[^:]*:\/\/.*/.test(openTabInfo.url))
-    for i of tabQueue[openTabInfo.windowId]
-      if (tabQueue[openTabInfo.windowId][i].positionIndex > openTabInfo.positionIndex)
-        tabQueue[openTabInfo.windowId][i].positionIndex--
-    return
+  unless chrome.sessions
+    if (/^(chrome|view-source:)[^:]*:\/\/.*/.test(openTabInfo.url))
+      for i of tabQueue[openTabInfo.windowId]
+        if (tabQueue[openTabInfo.windowId][i].positionIndex > openTabInfo.positionIndex)
+          tabQueue[openTabInfo.windowId][i].positionIndex--
+      return
 
-  if (tabQueue[openTabInfo.windowId])
-    tabQueue[openTabInfo.windowId].push(openTabInfo)
-  else
-    tabQueue[openTabInfo.windowId] = [openTabInfo]
+    if (tabQueue[openTabInfo.windowId])
+      tabQueue[openTabInfo.windowId].push(openTabInfo)
+    else
+      tabQueue[openTabInfo.windowId] = [openTabInfo]
 
   # keep the reference around for a while to wait for the last messages from the closed tab (e.g. for updating
   # scroll position)
   tabInfoMap.deletor = -> delete tabInfoMap[tabId]
   setTimeout tabInfoMap.deletor, 1000
-  delete framesForTab[tabId]
+  delete frameIdsForTab[tabId]
+  delete urlForTab[tabId]
 
-chrome.tabs.onActiveChanged.addListener (tabId, selectInfo) -> updateActiveState(tabId)
-
-chrome.windows.onRemoved.addListener (windowId) -> delete tabQueue[windowId]
+unless chrome.sessions
+  chrome.windows.onRemoved.addListener (windowId) -> delete tabQueue[windowId]
 
 # End action functions
 
@@ -520,6 +564,14 @@ handleKeyDown = (request, port) ->
     console.log("checking keyQueue: [", keyQueue + key, "]")
     keyQueue = checkKeyQueue(keyQueue + key, port.sender.tab.id, request.frameId)
     console.log("new KeyQueue: " + keyQueue)
+  # Tell the content script whether there are keys in the queue.
+  # FIXME: There is a race condition here.  The behaviour in the content script depends upon whether this message gets
+  # back there before or after the next keystroke.
+  # That being said, I suspect there are other similar race conditions here, for example in checkKeyQueue().
+  # Steve (23 Aug, 14).
+  chrome.tabs.sendMessage(port.sender.tab.id,
+    name: "currentKeyQueue",
+    keyQueue: keyQueue)
 
 checkKeyQueue = (keysToCheck, tabId, frameId) ->
   refreshedCompletionKeys = false
@@ -532,23 +584,35 @@ checkKeyQueue = (keysToCheck, tabId, frameId) ->
 
   if (Commands.keyToCommandRegistry[command])
     registryEntry = Commands.keyToCommandRegistry[command]
+    runCommand = true
 
-    if !registryEntry.isBackgroundCommand
-      chrome.tabs.sendMessage(tabId,
-        name: "executePageCommand",
-        command: registryEntry.command,
-        frameId: frameId,
-        count: count,
-        passCountToFunction: registryEntry.passCountToFunction,
-        completionKeys: generateCompletionKeys(""))
-      refreshedCompletionKeys = true
-    else
-      if registryEntry.passCountToFunction
-        BackgroundCommands[registryEntry.command](count)
-      else if registryEntry.noRepeat
-        BackgroundCommands[registryEntry.command]()
+    if registryEntry.noRepeat
+      count = 1
+    else if registryEntry.repeatLimit and count > registryEntry.repeatLimit
+      runCommand = confirm """
+        You have asked Vimium to perform #{count} repeats of the command:
+        #{Commands.availableCommands[registryEntry.command].description}
+
+        Are you sure you want to continue?
+      """
+
+    if runCommand
+      if not registryEntry.isBackgroundCommand
+        chrome.tabs.sendMessage(tabId,
+          name: "executePageCommand",
+          command: registryEntry.command,
+          frameId: frameId,
+          count: count,
+          passCountToFunction: registryEntry.passCountToFunction,
+          completionKeys: generateCompletionKeys(""))
+        refreshedCompletionKeys = true
       else
-        repeatFunction(BackgroundCommands[registryEntry.command], count, 0, frameId)
+        if registryEntry.passCountToFunction
+          BackgroundCommands[registryEntry.command](count, frameId)
+        else if registryEntry.noRepeat
+          BackgroundCommands[registryEntry.command](frameId)
+        else
+          repeatFunction(BackgroundCommands[registryEntry.command], count, 0, frameId)
 
     newKeyQueue = ""
   else if (getActualKeyStrokeLength(command) > 1)
@@ -578,36 +642,40 @@ sendRequestToAllTabs = (args) ->
       for tab in window.tabs
         chrome.tabs.sendMessage(tab.id, args, null))
 
-#
-# Returns true if the current extension version is greater than the previously recorded version in
-# localStorage, and false otherwise.
-#
-shouldShowUpgradeMessage = ->
-  # Avoid showing the upgrade notification when previousVersion is undefined, which is the case for new
-  # installs.
-  Settings.set("previousVersion", currentVersion) unless Settings.get("previousVersion")
-  Utils.compareVersions(currentVersion, Settings.get("previousVersion")) == 1
-
 openOptionsPageInNewTab = ->
   chrome.tabs.getSelected(null, (tab) ->
     chrome.tabs.create({ url: chrome.runtime.getURL("pages/options.html"), index: tab.index + 1 }))
 
 registerFrame = (request, sender) ->
-  unless framesForTab[sender.tab.id]
-    framesForTab[sender.tab.id] = { frames: [] }
+  (frameIdsForTab[sender.tab.id] ?= []).push request.frameId
 
-  if (request.is_top)
-    focusedFrame = request.frameId
-    framesForTab[sender.tab.id].total = request.total
+unregisterFrame = (request, sender) ->
+  tabId = sender.tab.id
+  if frameIdsForTab[tabId]?
+    if request.tab_is_closing
+      updateOpenTabs sender.tab, true
+    else
+      frameIdsForTab[tabId] = frameIdsForTab[tabId].filter (id) -> id != request.frameId
 
-  framesForTab[sender.tab.id].frames.push({ id: request.frameId, area: request.area })
+handleFrameFocused = (request, sender) ->
+  tabId = sender.tab.id
+  # Cycle frameIdsForTab to the focused frame.  However, also ensure that we don't inadvertently register a
+  # frame which wasn't previously registered (such as a frameset).
+  if frameIdsForTab[tabId]? and request.frameId in frameIdsForTab[tabId]
+    frameIdsForTab[tabId] =
+      [request.frameId, (frameIdsForTab[tabId].filter (id) -> id != request.frameId)...]
+  # Inform all frames that a frame has received the focus.
+  chrome.tabs.sendMessage sender.tab.id,
+    name: "frameFocused"
+    focusFrameId: request.frameId
 
-handleFrameFocused = (request, sender) -> focusedFrame = request.frameId
+# Send a message to all frames in the current tab.
+sendMessageToFrames = (request, sender) ->
+  chrome.tabs.sendMessage sender.tab.id, request.message
 
-getCurrFrameIndex = (frames) ->
-  for i in [0...frames.length]
-    return i if frames[i].id == focusedFrame
-  frames.length + 1
+# For debugging only. This allows content scripts to log messages to the background page's console.
+bgLog = (request, sender) ->
+  console.log "#{sender.tab.id}/#{request.frameId}", request.message
 
 # Port handler mapping
 portHandlers =
@@ -616,23 +684,41 @@ portHandlers =
   filterCompleter: filterCompleter
 
 sendRequestHandlers =
-  getCompletionKeys: getCompletionKeysRequest,
-  getCurrentTabUrl: getCurrentTabUrl,
-  openUrlInNewTab: openUrlInNewTab,
-  openUrlInIncognito: openUrlInIncognito,
-  openUrlInCurrentTab: openUrlInCurrentTab,
-  openOptionsPageInNewTab: openOptionsPageInNewTab,
-  registerFrame: registerFrame,
-  frameFocused: handleFrameFocused,
-  upgradeNotificationClosed: upgradeNotificationClosed,
-  updateScrollPosition: handleUpdateScrollPosition,
-  copyToClipboard: copyToClipboard,
-  isEnabledForUrl: isEnabledForUrl,
-  saveHelpDialogSettings: saveHelpDialogSettings,
-  selectSpecificTab: selectSpecificTab,
+  getCompletionKeys: getCompletionKeysRequest
+  getCurrentTabUrl: getCurrentTabUrl
+  openUrlInNewTab: openUrlInNewTab
+  openUrlInIncognito: openUrlInIncognito
+  openUrlInCurrentTab: openUrlInCurrentTab
+  openOptionsPageInNewTab: openOptionsPageInNewTab
+  registerFrame: registerFrame
+  unregisterFrame: unregisterFrame
+  frameFocused: handleFrameFocused
+  nextFrame: (request) -> BackgroundCommands.nextFrame 1, request.frameId
+  updateScrollPosition: handleUpdateScrollPosition
+  copyToClipboard: copyToClipboard
+  pasteFromClipboard: pasteFromClipboard
+  isEnabledForUrl: isEnabledForUrl
+  selectSpecificTab: selectSpecificTab
   refreshCompleter: refreshCompleter
-  createMark: Marks.create.bind(Marks),
+  createMark: Marks.create.bind(Marks)
   gotoMark: Marks.goto.bind(Marks)
+  setIcon: setIcon
+  sendMessageToFrames: sendMessageToFrames
+  log: bgLog
+
+# We always remove chrome.storage.local/findModeRawQueryListIncognito on startup.
+chrome.storage.local.remove "findModeRawQueryListIncognito"
+
+# Remove chrome.storage.local/findModeRawQueryListIncognito if there are no remaining incognito-mode windows.
+# Since the common case is that there are none to begin with, we first check whether the key is set at all.
+chrome.tabs.onRemoved.addListener (tabId) ->
+  chrome.storage.local.get "findModeRawQueryListIncognito", (items) ->
+    if items.findModeRawQueryListIncognito
+      chrome.windows.getAll null, (windows) ->
+        for window in windows
+          return if window.incognito
+        # There are no remaining incognito-mode tabs, and findModeRawQueryListIncognito is set.
+        chrome.storage.local.remove "findModeRawQueryListIncognito"
 
 # Convenience function for development use.
 window.runTests = -> open(chrome.runtime.getURL('tests/dom_tests/dom_tests.html'))
@@ -647,8 +733,30 @@ if Settings.has("keyMappings")
 
 populateValidFirstKeys()
 populateSingleKeyCommands()
-if shouldShowUpgradeMessage()
-  sendRequestToAllTabs({ name: "showUpgradeNotification", version: currentVersion })
+
+# Show notification on upgrade.
+showUpgradeMessage = ->
+  # Avoid showing the upgrade notification when previousVersion is undefined, which is the case for new
+  # installs.
+  Settings.set "previousVersion", currentVersion  unless Settings.get "previousVersion"
+  if Utils.compareVersions(currentVersion, Settings.get "previousVersion" ) == 1
+    notificationId = "VimiumUpgradeNotification"
+    notification =
+      type: "basic"
+      iconUrl: chrome.runtime.getURL "icons/vimium.png"
+      title: "Vimium Upgrade"
+      message: "Vimium has been upgraded to version #{currentVersion}. Click here for more information."
+      isClickable: true
+    if chrome.notifications?.create?
+      chrome.notifications.create notificationId, notification, ->
+        unless chrome.runtime.lastError
+          Settings.set "previousVersion", currentVersion
+          chrome.notifications.onClicked.addListener (id) ->
+            if id == notificationId
+              openUrlInNewTab url: "https://github.com/philc/vimium#release-notes"
+    else
+      # We need to wait for the user to accept the "notifications" permission.
+      chrome.permissions.onAdded.addListener showUpgradeMessage
 
 # Ensure that tabInfoMap is populated when Vimium is installed.
 chrome.windows.getAll { populate: true }, (windows) ->
@@ -661,3 +769,4 @@ chrome.windows.getAll { populate: true }, (windows) ->
 
 # Start pulling changes from synchronized storage.
 Sync.init()
+showUpgradeMessage()

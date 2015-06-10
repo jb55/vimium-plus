@@ -1,8 +1,10 @@
 require "./test_helper.js"
 extend(global, require "../../lib/utils.js")
 extend(global, require "../../background_scripts/completion.js")
+extend global, require "./test_chrome_stubs.js"
 
-global.chrome = {}
+global.document =
+  createElement: -> {}
 
 context "bookmark completer",
   setup ->
@@ -22,6 +24,26 @@ context "bookmark completer",
     @completer.refresh()
     results = filterCompleter(@completer, ["mark2"])
     assert.arrayEqual [@bookmark2.url], results.map (suggestion) -> suggestion.url
+
+  should "return *no* matching bookmarks when there is no match", ->
+    @completer.refresh()
+    results = filterCompleter(@completer, ["does-not-match"])
+    assert.arrayEqual [], results.map (suggestion) -> suggestion.url
+
+  should "construct bookmark paths correctly", ->
+    @completer.refresh()
+    results = filterCompleter(@completer, ["mark2"])
+    assert.equal "/bookmark1/bookmark2", @bookmark2.pathAndTitle
+
+  should "return matching bookmark *titles* when searching *without* the folder separator character", ->
+    @completer.refresh()
+    results = filterCompleter(@completer, ["mark2"])
+    assert.arrayEqual ["bookmark2"], results.map (suggestion) -> suggestion.title
+
+  should "return matching bookmark *paths* when searching with the folder separator character", ->
+    @completer.refresh()
+    results = filterCompleter(@completer, ["/bookmark1", "mark2"])
+    assert.arrayEqual ["/bookmark1/bookmark2"], results.map (suggestion) -> suggestion.title
 
 context "HistoryCache",
   context "binary search",
@@ -130,8 +152,9 @@ context "domain completer",
   setup ->
     @history1 = { title: "history1", url: "http://history1.com", lastVisitTime: hours(1) }
     @history2 = { title: "history2", url: "http://history2.com", lastVisitTime: hours(1) }
+    @undef    = { title: "history2", url: "http://undefined.net", lastVisitTime: hours(1) }
 
-    stub(HistoryCache, "use", (onComplete) => onComplete([@history1, @history2]))
+    stub(HistoryCache, "use", (onComplete) => onComplete([@history1, @history2, @undef]))
     global.chrome.history =
       onVisited: { addListener: -> }
       onVisitRemoved: { addListener: -> }
@@ -141,16 +164,19 @@ context "domain completer",
 
   should "return only a single matching domain", ->
     results = filterCompleter(@completer, ["story"])
-    assert.arrayEqual ["history1.com"], results.map (result) -> result.url
+    assert.arrayEqual ["http://history1.com"], results.map (result) -> result.url
 
   should "pick domains which are more recent", ->
     # These domains are the same except for their last visited time.
-    assert.equal "history1.com", filterCompleter(@completer, ["story"])[0].url
+    assert.equal "http://history1.com", filterCompleter(@completer, ["story"])[0].url
     @history2.lastVisitTime = hours(3)
-    assert.equal "history2.com", filterCompleter(@completer, ["story"])[0].url
+    assert.equal "http://history2.com", filterCompleter(@completer, ["story"])[0].url
 
   should "returns no results when there's more than one query term, because clearly it's not a domain", ->
     assert.arrayEqual [], filterCompleter(@completer, ["his", "tory"])
+
+  should "not return any results for empty queries", ->
+    assert.arrayEqual [], filterCompleter(@completer, [])
 
 context "domain completer (removing entries)",
   setup ->
@@ -172,15 +198,15 @@ context "domain completer (removing entries)",
 
   should "remove 1 entry for domain with reference count of 1", ->
     @onVisitRemovedListener { allHistory: false, urls: [@history1.url] }
-    assert.equal "history2.com", filterCompleter(@completer, ["story"])[0].url
+    assert.equal "http://history2.com", filterCompleter(@completer, ["story"])[0].url
     assert.equal 0, filterCompleter(@completer, ["story1"]).length
 
   should "remove 2 entries for domain with reference count of 2", ->
     @onVisitRemovedListener { allHistory: false, urls: [@history2.url] }
-    assert.equal "history2.com", filterCompleter(@completer, ["story2"])[0].url
+    assert.equal "http://history2.com", filterCompleter(@completer, ["story2"])[0].url
     @onVisitRemovedListener { allHistory: false, urls: [@history3.url] }
     assert.equal 0, filterCompleter(@completer, ["story2"]).length
-    assert.equal "history1.com", filterCompleter(@completer, ["story"])[0].url
+    assert.equal "http://history1.com", filterCompleter(@completer, ["story"])[0].url
 
   should "remove 3 (all) matching domain entries", ->
     @onVisitRemovedListener { allHistory: false, urls: [@history2.url] }
@@ -209,6 +235,27 @@ context "tab completer",
     assert.arrayEqual ["tab2.com"], results.map (tab) -> tab.url
     assert.arrayEqual [2], results.map (tab) -> tab.tabId
 
+context "search engines",
+  setup ->
+    searchEngines = "foo: bar?q=%s\n# comment\nbaz: qux?q=%s baz description"
+    Settings.set 'searchEngines', searchEngines
+    @completer = new SearchEngineCompleter()
+    # note, I couldn't just call @completer.refresh() here as I couldn't set root.Settings without errors
+    # workaround is below, would be good for someone that understands the testing system better than me to improve
+    @completer.searchEngines = SearchEngineCompleter.getSearchEngines()
+
+  should "return search engine suggestion without description", ->
+    results = filterCompleter(@completer, ["foo", "hello"])
+    assert.arrayEqual ["bar?q=hello"], results.map (result) -> result.url
+    assert.arrayEqual ["foo: hello"], results.map (result) -> result.title
+    assert.arrayEqual ["search"], results.map (result) -> result.type
+
+  should "return search engine suggestion with description", ->
+    results = filterCompleter(@completer, ["baz", "hello"])
+    assert.arrayEqual ["qux?q=hello"], results.map (result) -> result.url
+    assert.arrayEqual ["hello"], results.map (result) -> result.title
+    assert.arrayEqual ["baz description"], results.map (result) -> result.type
+
 context "suggestions",
   should "escape html in page titles", ->
     suggestion = new Suggestion(["queryterm"], "tab", "url", "title <span>", returns(1))
@@ -228,6 +275,50 @@ context "suggestions",
     suggestion = new Suggestion(["queryterm"], "tab", "http://ninjawords.com", "ninjawords", returns(1))
     assert.equal -1, suggestion.generateHtml().indexOf("http://ninjawords.com")
 
+context "RankingUtils.wordRelevancy",
+  should "score higher in shorter URLs", ->
+    highScore = RankingUtils.wordRelevancy(["stack"], "http://stackoverflow.com/short",  "a-title")
+    lowScore  = RankingUtils.wordRelevancy(["stack"], "http://stackoverflow.com/longer", "a-title")
+    assert.isTrue highScore > lowScore
+
+  should "score higher in shorter titles", ->
+    highScore = RankingUtils.wordRelevancy(["coffee"], "a-url", "Coffeescript")
+    lowScore  = RankingUtils.wordRelevancy(["coffee"], "a-url", "Coffeescript rocks")
+    assert.isTrue highScore > lowScore
+
+  should "score higher for matching the start of a word (in a URL)", ->
+    lowScore  = RankingUtils.wordRelevancy(["stack"], "http://Xstackoverflow.com/same", "a-title")
+    highScore = RankingUtils.wordRelevancy(["stack"], "http://stackoverflowX.com/same", "a-title")
+    assert.isTrue highScore > lowScore
+
+  should "score higher for matching the start of a word (in a title)", ->
+    lowScore  = RankingUtils.wordRelevancy(["te"], "a-url", "Dist racted")
+    highScore = RankingUtils.wordRelevancy(["te"], "a-url", "Distrac ted")
+    assert.isTrue highScore > lowScore
+
+  should "score higher for matching a whole word (in a URL)", ->
+    lowScore  = RankingUtils.wordRelevancy(["com"], "http://stackoverflow.comX/same", "a-title")
+    highScore = RankingUtils.wordRelevancy(["com"], "http://stackoverflowX.com/same", "a-title")
+    assert.isTrue highScore > lowScore
+
+  should "score higher for matching a whole word (in a title)", ->
+    lowScore  = RankingUtils.wordRelevancy(["com"], "a-url", "abc comX")
+    highScore = RankingUtils.wordRelevancy(["com"], "a-url", "abcX com")
+    assert.isTrue highScore > lowScore
+
+  # # TODO: (smblott)
+  # #       Word relevancy should take into account the number of matches (it doesn't currently).
+  # should "score higher for multiple matches (in a URL)", ->
+  #   lowScore  = RankingUtils.wordRelevancy(["stack"], "http://stackoverflow.com/Xxxxxx", "a-title")
+  #   highScore = RankingUtils.wordRelevancy(["stack"], "http://stackoverflow.com/Xstack", "a-title")
+  #   assert.isTrue highScore > lowScore
+
+  # should "score higher for multiple matches (in a title)", ->
+  #   lowScore  = RankingUtils.wordRelevancy(["bbc"], "http://stackoverflow.com/same", "BBC Radio 4 (XBCr4)")
+  #   highScore = RankingUtils.wordRelevancy(["bbc"], "http://stackoverflow.com/same", "BBC Radio 4 (BBCr4)")
+  #   assert.isTrue highScore > lowScore
+
+context "Suggestion.pushMatchingRanges",
   should "extract ranges matching term (simple case, two matches)", ->
     ranges = []
     [ one, two, three ] = [ "one", "two", "three" ]
@@ -318,6 +409,58 @@ context "RegexpCache",
 
   should "search for a string with a prefix/suffix (negative case)", ->
     assert.isTrue "hound dog".search(RegexpCache.get("do", "\\b", "\\b")) == -1
+
+fakeTimeDeltaElapsing = ->
+
+context "TabRecency",
+  setup ->
+    @tabRecency = new TabRecency()
+
+    fakeTimeDeltaElapsing = =>
+      if @tabRecency.lastVisitedTime?
+        @tabRecency.lastVisitedTime = new Date(@tabRecency.lastVisitedTime - @tabRecency.timeDelta)
+
+    @tabRecency.register 3
+    fakeTimeDeltaElapsing()
+    @tabRecency.register 2
+    fakeTimeDeltaElapsing()
+    @tabRecency.register 9
+    fakeTimeDeltaElapsing()
+    @tabRecency.register 1
+    @tabRecency.deregister 9
+    fakeTimeDeltaElapsing()
+    @tabRecency.register 4
+    fakeTimeDeltaElapsing()
+
+  should "have entries for recently active tabs", ->
+    assert.isTrue @tabRecency.cache[1]
+    assert.isTrue @tabRecency.cache[2]
+    assert.isTrue @tabRecency.cache[3]
+
+  should "not have entries for removed tabs", ->
+    assert.isFalse @tabRecency.cache[9]
+
+  should "give a high score to the most recent tab", ->
+    assert.isTrue @tabRecency.recencyScore(4) < @tabRecency.recencyScore 1
+    assert.isTrue @tabRecency.recencyScore(3) < @tabRecency.recencyScore 1
+    assert.isTrue @tabRecency.recencyScore(2) < @tabRecency.recencyScore 1
+
+  should "give a low score to the current tab", ->
+    assert.isTrue @tabRecency.recencyScore(1) > @tabRecency.recencyScore 4
+    assert.isTrue @tabRecency.recencyScore(2) > @tabRecency.recencyScore 4
+    assert.isTrue @tabRecency.recencyScore(3) > @tabRecency.recencyScore 4
+
+  should "rank tabs by recency", ->
+    assert.isTrue @tabRecency.recencyScore(3) < @tabRecency.recencyScore 2
+    assert.isTrue @tabRecency.recencyScore(2) < @tabRecency.recencyScore 1
+    @tabRecency.register 3
+    fakeTimeDeltaElapsing()
+    @tabRecency.register 4 # Making 3 the most recent tab which isn't the current tab.
+    assert.isTrue @tabRecency.recencyScore(1) < @tabRecency.recencyScore 3
+    assert.isTrue @tabRecency.recencyScore(2) < @tabRecency.recencyScore 3
+    assert.isTrue @tabRecency.recencyScore(4) < @tabRecency.recencyScore 3
+    assert.isTrue @tabRecency.recencyScore(4) < @tabRecency.recencyScore 1
+    assert.isTrue @tabRecency.recencyScore(4) < @tabRecency.recencyScore 2
 
 # A convenience wrapper around completer.filter() so it can be called synchronously in tests.
 filterCompleter = (completer, queryTerms) ->

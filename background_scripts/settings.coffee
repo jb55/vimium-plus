@@ -32,6 +32,12 @@ root.Settings = Settings =
       root.Commands.parseCustomKeyMappings value
       root.refreshCompletionKeysAfterMappingSave()
 
+    searchEngines: (value) ->
+      root.SearchEngineCompleter.parseSearchEngines value
+
+    exclusionRules: (value) ->
+      root.Exclusions.postUpdateHook value
+
   # postUpdateHooks convenience wrapper
   performPostUpdateHook: (key, value) ->
     @postUpdateHooks[key] value if @postUpdateHooks[key]
@@ -40,6 +46,8 @@ root.Settings = Settings =
   # or strings
   defaults:
     scrollStepSize: 60
+    smoothScroll: true
+    keyMappings: "# Insert your preferred key mappings here."
     linkHintCharacters: "sadfjklewcmpgh"
     linkHintNumbers: "0123456789"
     filterLinkHints: false
@@ -63,10 +71,13 @@ root.Settings = Settings =
       div > .vimiumHintMarker > .matchingCharacter {
       }
       """
-    excludedUrls:
-      """
-      http*://mail.google.com/*
-      """
+    # Default exclusion rules.
+    exclusionRules:
+      [
+        # Disable Vimium on Gmail.
+        { pattern: "http*://mail.google.com/*", passKeys: "" }
+      ]
+
     # NOTE: If a page contains both a single angle-bracket link and a double angle-bracket link, then in
     # most cases the single bracket link will be "prev/next page" and the double bracket link will be
     # "first/last page", so we put the single bracket first in the pattern string so that it gets searched
@@ -78,10 +89,24 @@ root.Settings = Settings =
     nextPatterns: "next,more,>,\u2192,\xbb,\u226b,>>"
     # default/fall back search engine
     searchUrl: "http://www.google.com/search?q="
+    # put in an example search engine
+    searchEngines: "w: http://www.wikipedia.org/w/index.php?title=Special:Search&search=%s wikipedia"
+    newTabUrl: "chrome://newtab"
+    grabBackFocus: false
 
     settingsVersion: Utils.getCurrentVersion()
+
 
 # We use settingsVersion to coordinate any necessary schema changes.
 if Utils.compareVersions("1.42", Settings.get("settingsVersion")) != -1
   Settings.set("scrollStepSize", parseFloat Settings.get("scrollStepSize"))
 Settings.set("settingsVersion", Utils.getCurrentVersion())
+
+# Migration (after 1.49, 2015/2/1).
+# Legacy setting: findModeRawQuery (a string).
+# New setting: findModeRawQueryList (a list of strings), now stored in chrome.storage.local (not localStorage).
+chrome.storage.local.get "findModeRawQueryList", (items) ->
+  unless chrome.runtime.lastError or items.findModeRawQueryList
+    rawQuery = Settings.get "findModeRawQuery"
+    chrome.storage.local.set findModeRawQueryList: (if rawQuery then [ rawQuery ] else [])
+
